@@ -1,0 +1,419 @@
+---
+title: "Figures concerning rates"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r, results= "hide", message=F, warning=F}
+library(gonogo)
+source("config.R")
+# devtools::load_all()
+source("config.R")
+options(tikzLatexPackages = c(
+  "\\usepackage{tikz}\n",
+  "\\usepackage[active,tightpage,psfixbb]{preview}\n",
+  "\\PreviewEnvironment{pgfpicture}\n",
+  "\\setlength\\PreviewBorder{0pt}\n",
+  "\\usepackage{ulem}\n",
+  "\\newcommand{\\downcone}{m}\n",
+  "\\newcommand{\\upcone}{m}\n",
+  "\\newcommand{\\vLRV}{LRV}\n",
+  "\\newcommand{\\vTV}{TV}\n",
+  "\\newcommand{\\vct}{}\n",
+  "\\newcommand{\\RCGoNotFirstTV}{RCGoNRCGoNRCGoN}\n",
+  "\\newcommand{\\vNoEffect}{0}\n",
+  paste0(
+    "\\newcommand{\\G",
+    c("Ind", "IndAdj", "Hot", "Lik", "LikAdj", "Meas", "IndBon"),
+    "}{mmmmm}"
+  )
+))
+source("theme_pub.R")
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(tidyr)
+options(dplyr.summarise.inform = FALSE)
+library(latex2exp)
+library(knitr)
+library(kableExtra)
+```
+```{r}
+system(paste("echo '", gonogo_version(), "'"))
+```
+```{r}
+TRIAL <- list()
+for (n.per.group in c(17)) {
+  for (n.vars in c(1, 2, 3)) {
+    for (add.powerless in c(-1, c(
+      seq(from = 1, to = 4, by = 0.1),
+      seq(from = 4, to = 25, by = 0.5)
+    )) %>% unique()) {
+      for (corr.intra in (c(0, 0.4))) {
+        TRIAL[[paste0(
+          "D=", 1,
+          ".V=", n.vars,
+          ".ρ=(", corr.intra, ")",
+          ".N=", n.per.group,
+          ".unpowered=(", add.powerless, ")"
+        )]] <-
+          if (add.powerless == -1) {
+            make_endpoints(
+              n.domains = 1,
+              domain.n.vars = n.vars,
+              corr.intra = corr.intra,
+              corr.inter = 0
+            ) %>% with_n_patients(per.group = n.per.group)
+          } else {
+            make_endpoints(
+              n.domains = 1,
+              domain.n.vars = n.vars + 1,
+              corr.intra = corr.intra,
+              corr.inter = 0,
+              vars.sd = c(rep(1, n.vars), add.powerless)
+            ) %>% with_n_patients(per.group = n.per.group)
+          }
+      }
+    }
+  }
+}
+names(TRIAL)
+
+parse_dot_name <- function(name) {
+  res <- stringr::str_match_all(name, "(([^.=]+)=([^().=]+|\\(([^)]+)\\)))*")[[1]]
+  ii <- !is.na(res[, 3])
+  res <- structure(
+    coalesce(res[ii, 5], res[ii, 4]),
+    names = res[ii, 3]
+  ) %>% as.list()
+  lapply(res, function(v) {
+    # if(stringr::str_detect(v, "^([0-9.]+_)*[0-9.]+$")) {
+    if (stringr::str_detect(v, "^-?[0-9.]+$")) {
+      n <- as.numeric(stringr::str_split(v, "_", simplify = TRUE))
+      # if(length(n) > 1) list(n) else n
+      n
+    } else {
+      v
+    }
+  }) %>% as_tibble_row()
+}
+```
+```{r}
+
+
+POLICY <- tibble::lst(
+  uni.adj =
+    p_policy(
+      stop.if = for_all_endpoints(p_univariate %>% has_stop()),
+      go.if =
+        at_least_1_adjusted(
+          at_each_endpoint(p_univariate %>% has_go()),
+          correction = "simes"
+        )
+    ),
+  # uni.adj.ignore =
+  #       p_policy(
+  #         stop.if  = (uni.adj %>% has_stop %>%
+  #                       at_selected_vars(all_but_last_var)),
+  #         go.if    = ((uni.adj %>% has_go) %>%
+  #                       at_selected_vars(all_but_last_var))
+  #       ),
+  # uni.adj.extra =
+  #       p_policy(
+  #         stop.if  = (uni.adj %>% has_stop %>%
+  #                       at_selected_vars(all_but_last_var)) %or%
+  #                     (p_not(uni.adj %>% has_go %>%
+  #                             at_selected_vars(all_but_last_var)) %and%
+  #                       (p_univariate %>% has_stop %>% at_selected_vars(last_var))),
+  #         go.if    = ((uni.adj %>% has_go) %>%
+  #                       at_selected_vars(all_but_last_var)) %or%
+  #                     (p_univariate %>% has_go %>% at_selected_vars(last_var))
+  #       ),
+  # uni.adj.only.stop =
+  #       p_policy(
+  #         stop.if  = (uni.adj %>% has_stop %>%
+  #                       at_selected_vars(all_but_last_var)) %or%
+  #                     (p_not(uni.adj %>% has_go %>%
+  #                             at_selected_vars(all_but_last_var)) %and%
+  #                       (p_univariate %>% has_stop %>% at_selected_vars(last_var))),
+  #         go.if    =  (uni.adj %>% has_go) %>%
+  #                       at_selected_vars(all_but_last_var))
+)
+```
+
+
+```{r}
+go.regions <- list(
+  go.A = effect_is_gt("tv")
+)
+stop.regions <- list(
+  stop.A   = effect_is_lt("lrv"),
+  stop.C   = effect_is_lt(0)
+)
+
+DEFAULT.PARAMS <- list("p.FS" = 0.1, "p.FG" = 0.2)
+```
+
+```{r}
+SCENARIO <- lapply(TRIAL, function(trial) {
+  make_scenario(
+    trial = trial,
+    go.regions = go.regions,
+    stop.regions = stop.regions
+  ) %>% expand_regions()
+})
+```
+
+```{r}
+# policy <- schema %>% instantiate_at(scenario$trial$endpoints)
+GET.SIM <- function(scenario.name, policy.name) {
+  scenario <- SCENARIO[[scenario.name]]
+  policy.schema <- POLICY[[policy.name]]
+  if ((policy.name == "uni.adj.extra" ||
+    policy.name == "uni.adj.ignore" ||
+    policy.name == "uni.adj.only.stop") &&
+    parse_dot_name(scenario.name)$unpowered == "without") {
+    return(NULL)
+  }
+  # if(!stringr::str_detect(scenario.name, "N=17")) return(NULL)
+  # if(!stringr::str_detect(policy.name,   "lik")) return(NULL)
+  # if(any(stringr::str_detect(policy.name,   c("hot","meas"))) &&
+  #    (stringr::str_detect(scenario.name, "N=51") ||
+  #     stringr::str_detect(scenario.name, "\\.mixed"))) return(NULL)
+  sim.name <- paste0(scenario.name, ".policy=(", policy.name, ")")
+  message(sim.name)
+  run_experiment_inline(
+    paste0("sim_20220314_1743_", scenario.name, "_", policy.name),
+    function(N, cores, splits) {
+      scenario %>%
+        simulate_with_policy(policy.schema,
+          N = N,
+          cores = cores,
+          splits = splits,
+          verbose = TRUE,
+          simulate.fast = TRUE
+        )
+    },
+    N = 10000, cores = 1, splits = 1,
+    # quick.test = function(f) f(N = 5, cores = 1,splits=1),
+    depend.on.function = FALSE
+  )
+}
+```
+
+
+```{r}
+library(doParallel)
+stopImplicitCluster()
+options(mc.cores = 32, cores = 32)
+registerDoParallel(makeForkCluster())
+
+SCENARIO.DECISIONS.1 <-
+  foreach(scenario.name = names(SCENARIO), .combine = "bind_rows") %:%
+  foreach(policy.name = names(POLICY), .combine = "bind_rows") %dopar% {
+    sim.name <- paste0(scenario.name, ".", policy.name)
+    system(paste0("echo '", sim.name, "'"))
+    sim <- GET.SIM(scenario.name, policy.name)
+    if (is.null(sim)) {
+      return(NULL)
+    }
+    PARAMS <- list(
+      default = DEFAULT.PARAMS
+    )
+    run_experiment_inline(
+      paste0("sim_20220314_1743_", scenario.name, "_", policy.name),
+      function() {
+        lapply(names(PARAMS), function(params.name) {
+          params <- PARAMS[[params.name]]
+          sim.with.params <- sim %>% with_params(params)
+          sim.with.params %>%
+            aggregate_scenario() %>%
+            .$decisions.per.effect %>%
+            mutate(
+              scenario = !!scenario.name,
+              policy = !!policy.name,
+              params = !!params.name,
+              .before = everything()
+            )
+        }) %>% bind_rows()
+      },
+      depend.on.function = FALSE
+    )
+  }
+
+print(SCENARIO.DECISIONS.1)
+
+SCENARIO.DECISIONS <- SCENARIO.DECISIONS.1 %>%
+  # select(!starts_with("effect.for."))%>%
+  rowwise() %>%
+  summarise(
+    scenario.name = scenario,
+    parse_dot_name(scenario) %>%
+      rename_with(function(x) paste0("scenario.", x)),
+    cur_data()
+  ) %>%
+  rowwise() %>%
+  mutate(
+    power.extra =
+      if (scenario.unpowered == -1) {
+        NA
+      } else {
+        power_per_var(TRIAL[[scenario.name]])$vars$power[scenario.V + 1]
+      }
+  ) %>%
+  ungroup()
+
+# print(max(SCENARIO.METRICS$error.go.A,
+#           SCENARIO.METRICS$error.go.B,
+#           SCENARIO.METRICS$error.stop.A,
+#           SCENARIO.METRICS$error.stop.B1,
+#           SCENARIO.METRICS$error.stop.B2))
+
+SCENARIO.DECISIONS
+```
+
+# Figure 3.6 - Impact of adding a variable of power ≤ 0.8 on the domain-level decision probabilities.
+(power_1_domain_continuous_0.pdf, power_1_domain_continuous_0.4.pdf)
+
+```{r}
+
+pivot_decisions_longer <- function(data) {
+  data %>%
+    pivot_longer(
+      cols = ends_with(c(".go", ".discuss", ".stop")),
+      names_pattern = "(.*)\\.(go|discuss|stop)",
+      names_to = c(".value", "decision")
+    ) %>%
+    mutate(decision = factor(stringr::str_to_title(decision),
+      levels = decision.levels
+    ))
+}
+for (`scenario.ρ` in c(0, 0.4)) {
+  dd <- SCENARIO.DECISIONS %>%
+    filter(`scenario.ρ` == !!`scenario.ρ`)
+  dd0 <- SCENARIO.DECISIONS %>%
+    filter(`scenario.ρ` == 0)
+  dd2 <- dd %>%
+    filter(scenario.unpowered == -1)
+
+  dd1 <- dd %>%
+    pivot_decisions_longer() %>%
+    filter(scenario.unpowered > -1)
+
+  dd3.0 <- dd0 %>%
+    filter(scenario.unpowered > -1)
+
+  dd2.0 <- dd0 %>%
+    filter(scenario.unpowered == -1)
+
+  gg <- ggplot(dd1) +
+    theme_Publication() +
+    facet_grid(scenario.V ~ effect.name,
+      labeller =
+        labeller(
+          scenario.V = function(x) paste0("ν=", x),
+          effect.name = c(
+            go.A.1 = "**TV**",
+            stop.A.1 = "**LRV**",
+            stop.C.1 = "**0**"
+          )
+        )
+    ) +
+    geom_area(aes(x = power.extra, y = p, fill = decision), alpha = 0.4) +
+    geom_line(
+      data = dd1 %>% filter(decision != "Discuss"),
+      aes(
+        x = power.extra,
+        y = ifelse(decision == "Go", 1 - p, p),
+        col = decision,
+        linetype = "main"
+      )
+    ) +
+    geom_col(
+      data = dd2 %>% pivot_decisions_longer(),
+      aes(x = 1, y = p, fill = decision), alpha = 0.4, width = 0.1
+    ) +
+    geom_segment(data = dd2, aes(
+      col = "Go", linetype = "main",
+      y = 1 - p.go, yend = 1 - p.go,
+      x = 1 - .1, xend = 1 + .1
+    )) +
+    geom_segment(data = dd2, aes(
+      col = "Stop", linetype = "main",
+      y = p.stop, yend = p.stop,
+      x = 1 - .1, xend = 1 + .1
+    )) +
+    # geom_vline(aes(xintercept=0.8, linetype="0.8 power"))+
+    labs(y = "", x = TeX("Power of (ν+1)th variable"), fill = "Decision ", linetype = "Reference line  ", colour = "Guide colour") +
+    scale_fill_Decision() +
+    scale_y_continuous(
+      labels = function(x) scales::percent(x, suffix = "%"), limits = c(0, NA),
+      breaks = seq(0, 1, by = 0.25)
+    ) +
+    scale_x_continuous(
+      breaks = c(seq(0, 0.8, by = 0.2), 1),
+      labels = c(seq(0, 0.8, by = 0.2), "V=ν")
+    )
+
+  if (`scenario.ρ` == 0.4) {
+    gg <- gg +
+      geom_line(
+        data = dd3.0,
+        aes(x = power.extra, y = 1 - p.go, linetype = "with corr=0", col = "Go")
+      ) +
+      geom_line(
+        data = dd3.0,
+        aes(x = power.extra, y = p.stop, linetype = "with corr=0", col = "Stop")
+      ) +
+      geom_segment(data = dd2.0, aes(
+        col = "Go", linetype = "with corr=0",
+        y = 1 - p.go, yend = 1 - p.go,
+        x = 1 - .1, xend = 1 + .1
+      )) +
+      geom_segment(data = dd2.0, aes(
+        col = "Stop", linetype = "with corr=0",
+        y = p.stop, yend = p.stop,
+        x = 1 - .1, xend = 1 + .1
+      ))
+  }
+  gg <- gg +
+    geom_hline(
+      data = dd2, aes(linetype = "with v vars", yintercept = 1 - p.go), col = "#000000",
+      alpha = 0.6
+    ) +
+    geom_hline(
+      data = dd2, aes(linetype = "with v vars", yintercept = p.stop), col = "#000000",
+      alpha = 0.6
+    ) +
+    scale_color_Decision(darken = TRUE, guide = NULL) +
+    scale_linetype_manual(
+      values = c(
+        "main" = "solid",
+        "with corr=0" = "dotted",
+        "with v vars" = "dashed"
+      ),
+      labels = c( # "main" = "main",
+        "with corr=0" = "ρ=0",
+        "with v vars" = "V=ν"
+      ),
+      breaks = c("with corr=0", "with v vars")
+    ) +
+    theme(
+      legend.position = "bottom", legend.box = "horizontal", legend.margin = margin(),
+      strip.text = ggtext::element_markdown()
+    )
+  print(gg)
+  ggsave(plot = cowplot::get_legend(gg), "report/power_1_domain_continuous_legend.pdf", width = 16, height = 1.2, units = "cm", device = cairo_pdf)
+  gg <- gg + theme(legend.position = "none")
+  ggsave(paste0("report/power_1_domain_continuous_", `scenario.ρ`, ".pdf"),
+    device = cairo_pdf,
+    width = 16, height = 10, units = "cm"
+  )
+}
+```
+  

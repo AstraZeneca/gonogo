@@ -1,0 +1,638 @@
+---
+title: "Figures concerning rates"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r, results= "hide", message=F, warning=F}
+library(gonogo)
+library(tikzDevice)
+source("config.R")
+options(tikzLatexPackages = c(
+  "\\usepackage{tikz}\n",
+  "\\usepackage[active,tightpage,psfixbb]{preview}\n",
+  "\\PreviewEnvironment{pgfpicture}\n",
+  "\\setlength\\PreviewBorder{0pt}\n",
+  "\\usepackage{ulem}\n",
+  "\\newcommand{\\downcone}{m}\n",
+  "\\newcommand{\\upcone}{m}\n",
+  "\\newcommand{\\vLRV}{LRV}\n",
+  "\\newcommand{\\vTV}{TV}\n",
+  "\\newcommand{\\vNoEffect}{0}\n",
+  "\\newcommand{\\RFStop}{\\Theta^{FS}}\n",
+  paste0(
+    "\\newcommand{\\G",
+    c("Ind", "IndAdj", "Hot", "Lik", "LikAdj", "Meas", "IndBon"),
+    "}{mmmmm}"
+  )
+))
+options(
+  tikzDocumentDeclaration =
+    "\\documentclass[10pt,onecolumn,english]{book}"
+)
+```
+
+```{r}
+system(paste("echo '", gonogo_version(), "'"))
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(tidyr)
+options(dplyr.summarise.inform = FALSE)
+library(latex2exp)
+library(kableExtra)
+```
+
+```{r}
+TRIAL <- list()
+for (n.per.group in c(17)) {
+  for (domain.n.vars in c(2, 3, 4)) {
+    for (corr.intra in (c(0, 0.4, 0.8))) {
+      TRIAL[[paste0("V=", domain.n.vars, ".ρ=(", corr.intra, ")", ".N=", n.per.group)]] <-
+        make_endpoints(
+          n.domains = 1,
+          domain.n.vars = domain.n.vars,
+          corr.intra = corr.intra
+        ) %>% with_n_patients(per.group = n.per.group)
+    }
+  }
+}
+
+power_per_var(TRIAL$`V=2.ρ=(0).N=17`, use.effect = "tv")
+power_per_var(TRIAL$`V=2.ρ=(0).N=27`, use.effect = "tv-lrv", alpha = 0.1)
+
+
+for (domain.n.vars in c(2, 3, 4)) {
+  for (corr.intra in (c(0, 0.4, 0.8))) {
+    n.low.pow <- 1
+    TRIAL[[paste0("V=", domain.n.vars, ".ρ=(", corr.intra, ")", ".N=17.mixed")]] <-
+      make_endpoints(
+        n.domains = 1,
+        domain.n.vars = domain.n.vars,
+        vars.sd = c(
+          rep(1, domain.n.vars - n.low.pow),
+          rep(2, n.low.pow)
+        ),
+        corr.intra = corr.intra
+      ) %>% with_n_patients(per.group = 17)
+  }
+}
+
+power_per_var(TRIAL$`V=3.ρ=(0).N=17.mixed`, use.effect = "tv")
+```
+
+```{r}
+POLICY <- list(
+  uni = p_policy(
+    stop.if   = for_all_endpoints(p_univariate %>% is_Stop()),
+    go.if     = for_at_least_1_endpoint(p_univariate %>% is_Go())
+  ),
+  uni.adj =
+    p_policy(
+      stop.if = for_all_endpoints(p_univariate %>% has_stop()),
+      go.if =
+        at_least_1_adjusted(
+          at_each_endpoint(p_univariate %>% has_go()),
+          correction = "simes"
+        )
+    ),
+  uni.bon =
+    p_policy(
+      stop.if = for_all_endpoints(p_univariate %>% has_stop()),
+      go.if =
+        at_least_1_adjusted(
+          at_each_endpoint(p_univariate %>% has_go()),
+          correction = "bonferroni"
+        )
+    ),
+  hot = p_hotelling(
+    false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  lik = p_likelihood(
+    false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  meas = p_measure(
+    false.stop = for_at_least_1_endpoint(is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  lik.adj =
+    p_likelihood_adj(
+      false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+      false.go   = for_all_endpoints(effect_is_lt("lrv")),
+      df.go      = "max",
+      df.stop    = 1
+    )
+)
+```
+
+```{r}
+go.regions <- list( # theta.fs = effect_is_gt("tv"),
+  go.A = effect_is_gt("tv"),
+  go.B = for_at_least_1_endpoint(effect_is_gt("tv")) %and%
+    for_all_endpoints(effect_is_gt(0))
+)
+stop.regions <- list( # theta.fg = effect_is_lt("lrv"),
+  stop.A = effect_is_lt("lrv"),
+  stop.B1 = for_all_endpoints(effect_is_lt("lrv")) %and%
+    for_at_least_all_but_1_endpoint(effect_is_lt("0")),
+  stop.B2 = for_all_endpoints(effect_is_lt("lrv")) %and%
+    for_at_least_half_of_endpoints(effect_is_lt("0")),
+  stop.C = effect_is_lt(0)
+)
+
+DEFAULT.PARAMS <- list("p.FS" = 0.1, "p.FG" = 0.2)
+```
+
+```{r}
+SCENARIO <- lapply(TRIAL, function(trial) {
+  make_scenario(
+    trial = trial,
+    go.regions = go.regions,
+    stop.regions = stop.regions
+  ) %>% expand_regions()
+})
+```
+
+```{r}
+SCENARIO$`V=2.ρ=(0).N=17`$region.points
+SCENARIO$`V=3.ρ=(0.4).N=17`$region.points
+SCENARIO$`V=4.ρ=(0.8).N=27`$region.points
+SCENARIO$`V=4.ρ=(0.8).N=17.mixed`$region.points
+```
+```{r}
+sim23 <- SCENARIO$`V=2.ρ=(0).N=17` %>% simulate_with_policies(list(POLICY$lik.adj, POLICY$uni.adj))
+sim2 <- sim23[[1]]
+sim3 <- sim23[[2]]
+```
+
+```{r}
+# policy <- schema %>% instantiate_at(scenario$trial$endpoints)
+SCENARIO.SIM <- function(scenario.name, policy.name) {
+  scenario <- SCENARIO[[scenario.name]]
+  policy.schema <- POLICY[[policy.name]]
+  if (any(stringr::str_detect(policy.name, c("meas"))) &&
+    (stringr::str_detect(scenario.name, "N=27") ||
+      stringr::str_detect(scenario.name, "\\.mixed"))) {
+    return(NULL)
+  }
+  sim.name <- paste0(scenario.name, ".", policy.name)
+  system(paste0("echo '", sim.name, "'"))
+  run_experiment_inline(
+    paste0("sim_20220311_1004", "_", sim.name),
+    function(N, cores, splits) {
+      scenario %>%
+        simulate_with_policy(policy.schema,
+          N = N,
+          cores = cores,
+          splits = splits,
+          verbose = TRUE
+        )
+    },
+    N = 10000, cores = 1, splits = 1,
+    # quick.test = function(f) f(N = 5, cores = 1,splits=1),
+    depend.on.function = FALSE,
+    depends.on = list(scenario.name, policy.name),
+    random.seed = 202203071715 %% .Machine$integer.max
+  )
+}
+```
+
+
+```{r}
+library(doParallel)
+stopImplicitCluster()
+options(mc.cores = 16, cores = 16)
+registerDoParallel(makeForkCluster())
+
+SCENARIO.METRICS <-
+  foreach(scenario.name = names(SCENARIO), .combine = "bind_rows") %:%
+  foreach(policy.name = names(POLICY), .combine = "bind_rows") %dopar%
+  {
+    sim.name <- paste0(scenario.name, ".", policy.name)
+    sim <- SCENARIO.SIM(scenario.name, policy.name)
+    if (is.null(sim)) {
+      return(NULL)
+    }
+    PARAMS <- list(
+      default = DEFAULT.PARAMS
+    )
+    lapply(names(PARAMS), function(params.name) {
+      params <- PARAMS[[params.name]]
+      sim.with.params <- sim %>% with_params(params)
+      sim.with.params %>%
+        four_metrics_all() %>%
+        mutate(
+          scenario = !!scenario.name,
+          policy = !!policy.name,
+          params = !!params.name,
+          .before = everything()
+        )
+    }) %>% bind_rows()
+  } %>%
+  arrange(params)
+
+SCENARIO.METRICS <- SCENARIO.METRICS %>%
+  mutate(
+    scenario.vars = stringr::str_match(scenario, "V=([0-9]*)\\.")[, 2],
+    scenario.corr = stringr::str_match(scenario, "ρ=\\(([0-9.]*)\\)")[, 2],
+    scenario.N = stringr::str_match(scenario, "N=([0-9]*)")[, 2],
+    scenario.mixed = stringr::str_detect(scenario, "\\.mixed"),
+    .before = everything()
+  )
+
+print(max(
+  SCENARIO.METRICS$error.go.A,
+  SCENARIO.METRICS$error.go.B,
+  SCENARIO.METRICS$error.stop.A,
+  SCENARIO.METRICS$error.stop.B1,
+  SCENARIO.METRICS$error.stop.B2
+))
+
+SCENARIO.METRICS
+```
+  
+# Table 3.3 - Comparison of unadjusted multivariate policies.
+
+```{r} 
+options(knitr.table.format = "latex")
+# library(knitr)
+library(kableExtra)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+
+for (scenario.N in c(17)) {
+  # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+  for (params in c("default")) {
+    df <- SCENARIO.METRICS %>%
+      # filter(scenario.vars == !!scenario.vars) %>%
+      filter(scenario.N == !!scenario.N) %>%
+      filter(!scenario.mixed) %>%
+      filter(params == "default") %>%
+      filter(policy %in% c("uni", "meas", "hot")) %>%
+      arrange(scenario.vars, list(
+        uni = 1,
+        uni.bon = 6,
+        uni.adj = 7,
+        hot = 2,
+        meas = 3,
+        lik = 4,
+        lik.adj = 8
+      )[policy], scenario.corr) %>%
+      transmute(
+        Policy = policy,
+        "$ρ$" = paste0("", scenario.corr, ""),
+        FSR = round(FSR.go.B, 2),
+        CGr = round(CGr.go.B, 2),
+        FGr = round(FGr.stop.B1, 2),
+        CSr = round(CSr.stop.B1, 2),
+        .CGr.TV = round(CGr.go.A, 2),
+        "CGr "   = .CGr.TV,
+        .FGR.LRV = round(FGR.stop.A, 2),
+        "FGR "   = .FGR.LRV,
+        .CSr.0  = round(CSr.stop.C, 2),
+        "CSr " = .CSr.0,
+        .policy = policy,
+        .scenario.corr = scenario.corr,
+        .scenario.vars = scenario.vars,
+      ) %>%
+      group_by(.scenario.corr, .scenario.vars) %>%
+      mutate(
+        .CGr.is.max = (CGr == max(CGr)),
+        .CSr.is.max = (CSr == max(CSr)),
+        .FGr.is.min = (FGr == min(FGr)),
+        .FSR.is.min = (FSR == min(FSR)),
+        .CGr.TV.is.max = (.CGr.TV == max(.CGr.TV)),
+        .FGR.LRV.is.min = (.FGR.LRV == min(.FGR.LRV)),
+        .CSr.0.is.max = (.CSr.0 == max(.CSr.0)),
+      ) %>%
+      ungroup()
+
+
+    table <- kbl(df %>%
+      mutate(
+        CGr = cell_spec(format_round(CGr, 2), bold = .CGr.is.max, format = "latex"),
+        CSr = cell_spec(format_round(CSr, 2), bold = .CSr.is.max, format = "latex"),
+        FGr = cell_spec(format_round(FGr, 2), bold = .FGr.is.min, format = "latex"),
+        FSR = cell_spec(format_round(FSR, 2), bold = .FSR.is.min, format = "latex"),
+        "CGr " = cell_spec(format_round(.CGr.TV, 2), bold = .CGr.TV.is.max, format = "latex"),
+        "FGR " = cell_spec(format_round(.FGR.LRV, 2), bold = .FGR.LRV.is.min, format = "latex"),
+        "CSr " = cell_spec(format_round(.CSr.0, 2), bold = .CSr.0.is.max, format = "latex"),
+        Policy = list(
+          uni = "$\\GInd$",
+          uni.adj = "$\\GIndAdj$",
+          uni.bon = "$\\GIndBon$",
+          hot = "$\\GHot$",
+          meas = "$\\GMeas$",
+          lik = "$\\GLik$",
+          lik.adj = "$\\GLikAdj$"
+        )[.policy]
+      ) %>%
+      select(!starts_with(".")) %>% rename(" " = Policy),
+    "latex",
+    booktabs = T, escape = FALSE
+    )
+
+    for (scenario.vars in unique(df$.scenario.vars)) {
+      table <- table %>% pack_rows(
+        paste0("V=", scenario.vars),
+        min(which(df$.scenario.vars == scenario.vars)),
+        max(which(df$.scenario.vars == scenario.vars))
+      )
+    }
+    table <- table %>% collapse_rows(columns = 1, latex_hline = "major")
+    table <- table %>% add_header_above(c(
+      " " = 2, # "Parameters"=0,
+      "$\\\\RFStop = \\\\RCGoExt$" = 2, "$\\\\RCStopExt$" = 2,
+      "$\\\\upcone{\\\\vTV}$" = 1, "$\\\\downcone{\\\\vLRV}$" = 1, "$\\\\downcone{\\\\vct{0}}$" = 1
+    ), escape = F)
+    table <- table %>% kable_styling(
+      latex_options = "striped", position = "left",
+      stripe_index = which(df$.scenario.corr != 0.4)
+    )
+    file.name <- paste0("report/table_measure_all_", params, "_", scenario.N, ".tex")
+    table %>% save_kable(file = file.name)
+    cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+  }
+}
+```
+
+
+# Table 3.5 - Comparison of adjusted policies
+(table_measure_ext_default_17.tex)
+# Table 3.6 - Comparison of selected adjusted policies in the presence of one underpowered variable.
+(table_measure_ext_default_17.tex)
+
+```{r} 
+options(knitr.table.format = "latex")
+# library(knitr)
+library(kableExtra)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+
+the.scenario.N <- c(17, 17)
+the.scenario.mixed <- c(FALSE, TRUE)
+the.include.half <- c(TRUE, FALSE)
+
+for (i in seq(length(the.scenario.N))) {
+  # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+  scenario.N <- the.scenario.N[i]
+  scenario.mixed <- the.scenario.mixed[i]
+  include.half <- the.include.half[i]
+  for (params in c("default")) {
+    df <- SCENARIO.METRICS %>%
+      # filter(scenario.vars == !!scenario.vars) %>%
+      filter(scenario.N == !!scenario.N) %>%
+      filter(scenario.mixed == !!scenario.mixed) %>%
+      filter(params == "default") %>%
+      filter(policy %in% c("uni.bon", "uni.adj", "lik.adj") |
+        include.half & policy == "lik") %>%
+      arrange(scenario.vars, list(
+        uni = 1,
+        uni.bon = 0.5,
+        uni.adj = 2,
+        hot = 2,
+        meas = 3,
+        lik = 4,
+        lik.adj = 5
+      )[policy], scenario.corr) %>%
+      transmute(
+        Policy = policy,
+        "$ρ$" = paste0("", scenario.corr, ""),
+        # "$\\pFS$" = round(params.p.FS,4),
+        # "$\\pFG$" = round(params.p.FG,4),
+        FSR = round(FSR.go.B, 2),
+        CGr = round(CGr.go.B, 2),
+        FGr = round(FGr.stop.B1, 2),
+        # FGR = round(FGR.stop.B1,2),
+        CSr = round(CSr.stop.B1, 2),
+        # "FSr " = round(FSr.go.A,2),
+        .CGr.TV = round(CGr.go.A, 2),
+        "CGr "   = .CGr.TV,
+        .FGR.LRV = round(FGR.stop.A, 2),
+        "FGR "   = .FGR.LRV,
+        # "FGr " = round(FGr.stop.A,2),
+        # "CSr " = round(CSr.stop.A,2),
+        # "FGr  " = round(FGr.stop.C,2),
+        .CSr.0  = round(CSr.stop.C, 2),
+        "CSr " = .CSr.0,
+        .policy = policy,
+        .scenario.corr = scenario.corr,
+        .scenario.vars = scenario.vars,
+      ) %>%
+      group_by(.scenario.corr, .scenario.vars) %>%
+      mutate(
+        .CGr.is.max = (CGr == max(CGr)),
+        .CSr.is.max = (CSr == max(CSr)),
+        .FGr.is.min = (FGr == min(FGr)),
+        .FSR.is.min = (FSR == min(FSR)),
+        .CGr.TV.is.max = (.CGr.TV == max(.CGr.TV)),
+        .FGR.LRV.is.min = (.FGR.LRV == min(.FGR.LRV)),
+        .CSr.0.is.max = (.CSr.0 == max(.CSr.0)),
+      ) %>%
+      ungroup()
+
+
+    table <- kbl(df %>%
+      mutate(
+        CGr = cell_spec(format_round(CGr, 2), bold = .CGr.is.max, format = "latex"),
+        CSr = cell_spec(format_round(CSr, 2), bold = .CSr.is.max, format = "latex"),
+        FGr = cell_spec(format_round(FGr, 2), bold = .FGr.is.min, format = "latex"),
+        FSR = cell_spec(format_round(FSR, 2), bold = .FSR.is.min, format = "latex"),
+        "CGr " = cell_spec(format_round(.CGr.TV, 2), bold = .CGr.TV.is.max, format = "latex"),
+        "FGR " = cell_spec(format_round(.FGR.LRV, 2), bold = .FGR.LRV.is.min, format = "latex"),
+        "CSr " = cell_spec(format_round(.CSr.0, 2), bold = .CSr.0.is.max, format = "latex"),
+        Policy = list(
+          uni = "$\\GInd$",
+          uni.adj = "$\\GIndAdj$",
+          uni.bon = "$\\GIndBon$",
+          hot = "$\\GHot$",
+          meas = "$\\GMeas$",
+          lik = "$\\GLik$",
+          lik.adj = "$\\GLikAdj$"
+        )[.policy]
+      ) %>%
+      select(!starts_with(".")) %>% rename(" " = Policy),
+    "latex",
+    booktabs = T, escape = FALSE
+    )
+
+    for (scenario.vars in unique(df$.scenario.vars)) {
+      table <- table %>% pack_rows(
+        paste0("V=", scenario.vars),
+        min(which(df$.scenario.vars == scenario.vars)),
+        max(which(df$.scenario.vars == scenario.vars))
+      )
+    }
+    table <- table %>% collapse_rows(columns = 1, latex_hline = "major")
+    table <- table %>% add_header_above(c(
+      " " = 2, # "Parameters"=0,
+      "$\\\\RFStop = \\\\RCGoExt$" = 2, "$\\\\RCStopExt$" = 2,
+      "$\\\\upcone{\\\\vTV}$" = 1, "$\\\\downcone{\\\\vLRV}$" = 1, "$\\\\downcone{\\\\vct{0}}$" = 1
+    ), escape = F)
+    table <- table %>% kable_styling(
+      latex_options = "striped", position = "left",
+      stripe_index = which(df$.scenario.corr != 0.4)
+    )
+    file.name <- paste0(
+      "report/table_measure_ext_",
+      params,
+      "_", scenario.N,
+      ifelse(scenario.mixed, "_mixed", ""),
+      ".tex"
+    )
+    table %>% save_kable(file = file.name)
+    cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+  }
+}
+```
+
+
+# Figure 3.3 - Comparison of selected metrics for all policies under consideration for a single domain
+(plot_FGR_FSR_all_start.tex.fig)
+# Figure 3.5 - Comparison of Go rates for the adjusted policies, for a single domain.
+(plot_FGR_FSR_all_end.tex.fig)
+
+```{r, fig.height = 9, fig.width=8}
+source("theme_pub.R")
+library(forcats)
+dd <- SCENARIO.METRICS %>%
+  pivot_longer(cols = matches("[FC][GS][Rr].(go|stop).[A-Z][0-9]*"), names_to = "metric") %>%
+  filter(scenario.N == 17 & scenario.mixed == FALSE |
+    # scenario.N == 27 & scenario.mixed == FALSE |
+    scenario.N == 17 & scenario.mixed == TRUE) %>%
+  filter(`scenario.corr` <= 0.4) %>%
+  filter( # policy %in% c("hot","uni","meas")
+  ) %>%
+  mutate(combo = paste(scenario.N, scenario.mixed, sep = ".")) %>%
+  mutate(combo = factor(combo, levels = c("17.FALSE", "17.TRUE", "27.FALSE"))) %>%
+  # mutate(metric = factor(metric, levels=c("FGR.stop.A","FSR.go.B"))) %>%
+  mutate(policy = factor(policy, levels = c(
+    "uni", "meas", "hot", "lik",
+    "uni.bon", "uni.adj", "lik.adj"
+  )))
+
+policy_labels <- c(
+  "uni" = "$\\GInd$ ",
+  "meas" = "$\\GMeas$ ",
+  "hot" = "$\\GHot$ ",
+  "uni.bon" = "$\\GIndBon$",
+  "uni.adj" = "$\\GIndAdj$",
+  "lik" = "$\\GLik$",
+  "lik.adj" = "$\\GLikAdj$"
+)
+dd1 <- dd %>%
+  mutate(metric = factor(metric, levels = c("CSr.stop.C", "FSR.go.B", "FGR.stop.A"))) %>%
+  filter(!is.na(metric)) %>%
+  filter(combo == "17.FALSE") %>%
+  mutate(combo = paste(combo, scenario.corr, sep = "_")) %>%
+  mutate(combo = factor(combo, levels = c("17.FALSE_0", "17.FALSE_0.4")))
+gg <- ggplot(dd1) +
+  geom_rect(
+    data = dd1 %>% select(metric, combo) %>% distinct(),
+    aes(
+      xmin = -Inf, xmax = +Inf,
+      ymin = -Inf, ymax = +Inf,
+      fill = list(
+        `FGR.stop.A` = DECISION$Discuss,
+        `FSR.go.B` = DECISION$Discuss,
+        `CSr.stop.C` = DECISION$Stop
+      )[as.character(metric)] %>% unlist()
+    ), alpha = .05
+  ) +
+  geom_jitter(aes(color = policy, x = scenario.vars, y = value, shape = scenario.corr), height = 0, width = 0.1) +
+  facet_grid(metric ~ combo,
+    scales = "free_y",
+    labeller = labeller(
+      combo = c(
+        `17.FALSE_0` = "$N=17$, $\\sigma_V=1$, $\\rho=0$",
+        `17.FALSE_0.4` = "$N=17$, $\\sigma_V=1$, $\\rho=0.4$"
+      ),
+      metric = c(
+        `FGR.stop.A` = "FGR at $\\downcone{\\vLRV}$",
+        `FSR.go.B` = "FSR at $\\RFStop (= R^{\\mathrm{Go}}_{\\mathrm{ext}})$",
+        `CSr.stop.C` = "CSr at $\\downcone{\\vNoEffect}$"
+      )
+    )
+  ) +
+  theme_Publication() +
+  scale_fill_Decision(guide = "none") +
+  theme(legend.position = "bottom", legend.box = "vertical", legend.margin = margin()) +
+  geom_hline(data = tibble(
+    metric = c("FSR.go.B", "FGR.stop.A"),
+    yintercept = c(0.1, 0.2)
+  ), aes(yintercept = yintercept)) +
+  scale_colour_Publication(labels = policy_labels, drop = F) +
+  scale_y_continuous(labels = scales::label_percent(suffix = "\\%")) +
+  scale_shape_Publication() +
+  labs(x = "Number of variables ($V$)", y = "", colour = "Policy", shape = "$\\rho$") +
+  guides(color = guide_legend(nrow = 2, byrow = TRUE))
+print(gg)
+file.name <- "report/plot_FGR_FSR_all_start.tex.fig"
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.7, height = 7
+)
+print(gg)
+dev.off()
+
+dd2 <- dd %>%
+  mutate(metric = factor(metric, levels = c("FGR.stop.A", "CGr.go.A", "CGr.go.B"))) %>%
+  filter(!is.na(metric)) %>%
+  filter(policy %in% c("uni.bon", "uni.adj", "lik.adj"))
+gg <- ggplot(dd2) +
+  geom_rect(
+    data = dd2 %>% select(metric, combo) %>% distinct(),
+    aes(
+      xmin = -Inf, xmax = +Inf,
+      ymin = -Inf, ymax = +Inf,
+      fill = dplyr::if_else(metric == "FGR.stop.A", DECISION$Discuss, DECISION$Go)
+    ), alpha = .05
+  ) +
+  geom_jitter(aes(color = policy, x = scenario.vars, y = value, shape = scenario.corr), height = 0, width = 0.1) +
+  facet_grid(metric ~ combo,
+    scales = "free_y",
+    labeller =
+      labeller(
+        combo = c(
+          `17.FALSE` = "$N=17$, $\\sigma_V=1$",
+          `17.TRUE` = "$N=17$, $\\sigma_V=2$",
+          `27.FALSE` = "$N=27$, $\\sigma_V=1$"
+        ),
+        metric = c(
+          `FGR.stop.A` = "FGR at $\\downcone{\\vLRV}$",
+          `CGr.go.A` = "CGr at $\\upcone{\\vTV}$",
+          `CGr.go.B` = "CGr at $R^{\\mathrm{Go}}_{\\mathrm{ext}} (= \\RFStop)$"
+        )
+      )
+  ) +
+  scale_fill_Decision(guide = "none") +
+  theme_Publication() +
+  theme(legend.position = "bottom", legend.box = "vertical", legend.margin = margin()) +
+  geom_hline(data = tibble(
+    metric = c("FGR.stop.A"),
+    yintercept = c(0.2)
+  ), aes(yintercept = yintercept)) +
+  scale_colour_Publication(labels = policy_labels[levels(droplevels(dd2$policy))], drop = F, breaks = levels(droplevels(dd2$policy))) +
+  scale_y_continuous(labels = scales::label_percent(suffix = "\\%")) +
+  scale_shape_Publication() +
+  labs(x = "Number of variables ($V$)", y = "", shape = "$\\rho$", colour = "Policy")
+print(gg)
+file.name <- "report/plot_FGR_FSR_all_end.tex.fig"
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.7, height = 7.5
+)
+print(gg)
+dev.off()
+```
+
+
+
+

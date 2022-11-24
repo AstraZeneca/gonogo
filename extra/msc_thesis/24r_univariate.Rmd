@@ -1,0 +1,163 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(gonogo)
+source("config.R")
+library(knitr)
+library(kableExtra)
+library(tibble)
+library(dplyr)
+```
+```{r}
+system(paste("echo '", gonogo_version(), "'"))
+```
+```{r}
+POLICY <- POLICY <- list(
+  uni = p_univariate,
+  # uni.adj =
+  #       p_policy(
+  #         stop.if   = for_all_endpoints(p_univariate %>% has_stop()),
+  #         go.if     =
+  #           at_least_1_adjusted(
+  #             at_each_endpoint(p_univariate %>% has_go()),
+  #             correction="simes")
+  #       ),
+  # uni.bon =
+  #       p_policy(
+  #         stop.if   = for_all_endpoints(p_univariate %>% has_stop()),
+  #         go.if     =
+  #           at_least_1_adjusted(
+  #             at_each_endpoint(p_univariate %>% has_go()),
+  #             correction="bonferroni")
+  #       ),
+  hot = p_hotelling(
+    false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  lik = p_likelihood(
+    false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  meas = p_measure(
+    false.stop = for_at_least_1_endpoint(is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  )
+  # lik.adj =
+  #       p_likelihood_adj(
+  #         false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+  #         false.go   = for_all_endpoints(effect_is_lt("lrv")),
+  #         df.go      = "max",
+  #         df.stop    = 1
+  #       )
+)
+
+TRIAL <- list(
+  std = make_endpoints(n.domains = 1, vars.sd = 1) %>%
+    with_n_patients(per.group = 17),
+  high_pow = make_endpoints(n.domains = 1, vars.sd = 1) %>%
+    with_n_patients(per.group = 27),
+  highest_pow = make_endpoints(n.domains = 1, vars.sd = 0.5) %>%
+    with_n_patients(per.group = 17),
+  low_pow = make_endpoints(n.domains = 1, vars.sd = 2) %>%
+    with_n_patients(per.group = 17)
+)
+
+SCENARIO.UNI.SIM <-
+  lapply(TRIAL, FUN = function(trial) {
+    lapply(
+      POLICY,
+      FUN = function(policy) {
+        run_experiment_inline(
+          "sim_20220307_1737",
+          function(N, cores) {
+            make_scenario(
+              trial = trial,
+              go.regions = list(fs = is_gt("tv")),
+              stop.regions = list(fg = is_lt("lrv"))
+            ) %>%
+              simulate_with_policy(policy,
+                N = N,
+                cores = cores,
+                splits = 32,
+                verbose = TRUE
+              )
+          },
+          N = 10000, cores = 32,
+          depends.on = list(trial, policy),
+          random.seed = 202203071715 %% .Machine$integer.max
+          # quick.test = function(f) f(N = 3, cores = 1)
+        )
+      }
+    )
+  }) %>% do.call(what = base::c)
+names(SCENARIO.UNI.SIM)
+```
+# Table 3.2 - Simulated metrics for selected policies for V = 1 variables.
+
+```{r}
+DEFAULT.PARAMS <- list(p.FS = 0.1, p.FG = 0.2)
+df <- mapply(
+  SIMPLIFY = F,
+  SCENARIO.UNI.SIM,
+  names(SCENARIO.UNI.SIM),
+  FUN = function(sim, sim.name) {
+    s <- stringr::str_split(sim.name, pattern = "\\.", n = 2)
+    bind_cols(
+      tibble::tibble_row(trial = s[[1]][1], policy = s[[1]][2]),
+      sim %>%
+        with_params(DEFAULT.PARAMS) %>% four_metrics("fs", "fg")
+    )
+  }
+) %>%
+  bind_rows() %>%
+  filter(policy %in% c("uni", "hot", "meas", "lik")) %>%
+  filter(trial %in% c("std", "low_pow"))
+
+table <- kable(df %>%
+  transmute(
+    Policy = list(
+      uni = "$\\GU$",
+      hot = "$\\GHot$",
+      meas = "$\\GMeas$",
+      lik = "$\\GLik$"
+    )[policy],
+    # "$\\pFS$" = params.p.FS,
+    # "$\\pFG$" = params.p.FG,
+    "$\\FSR$" = FSR,
+    "$\\FSr$" = FSr,
+    "$\\CGr$" = CGr,
+    "$\\FGR$" = FGR,
+    "$\\FGr$" = FGr,
+    "$\\CSr$" = CSr
+  ),
+"latex",
+booktabs = T, escape = FALSE, digits = 3
+) %>%
+  add_header_above(c(
+    " " = 1,
+    # "Parameters"=2,
+    "$[\\\\theTV,+∞)$" = 3,
+    "$(-∞,\\\\theLRV]$" = 3
+  ), escape = F) %>%
+  kable_styling(
+    latex_options = "striped", position = "left",
+    stripe_index = which(df$policy %in% c("hot", "meas"))
+  )
+for (t in unique(df$trial)) {
+  table <- table %>% pack_rows(list(
+    std = "$σ = 1$, $N=17$",
+    high_pow = "$σ = 1$, $N=27$",
+    highest_pow = "$σ = 0.5$, $N=17$",
+    low_pow = "$σ = 2$, $N=17$"
+  )[[t]],
+  min(which(df$trial == t)), max(which(df$trial == t)),
+  escape = F, underline = T, latex_gap_space = "0.4em",
+  extra_latex_after = "\\addlinespace[0.2em]"
+  )
+}
+table %>% save_kable("report/table_metrics_univariate.tex")
+cat(readLines("report/table_metrics_univariate.tex"), sep = "\n")
+```

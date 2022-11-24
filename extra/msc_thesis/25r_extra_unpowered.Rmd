@@ -1,0 +1,648 @@
+---
+title: "Figures concerning rates"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r, results= "hide", message=F, warning=F}
+library(gonogo)
+library(tikzDevice)
+# devtools::load_all()
+source("config.R")
+options(tikzLatexPackages = c(
+  getOption("tikzLatexPackages"),
+  "\\usepackage{ulem}"
+))
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(tidyr)
+options(dplyr.summarise.inform = FALSE)
+library(latex2exp)
+library(kableExtra)
+```
+```{r}
+system(paste("echo '", gonogo_version(), "'"))
+```
+
+```{r}
+low.power.sd <- 2
+TRIAL <- list()
+for (n.per.group in c(17)) {
+  for (n.domains in c(1, 2, 3, 4, 5)) {
+    # Maximum 10 variables, 4 variables per domain
+    for (n.vars in seq(n.domains, min(4 * n.domains, 9))) {
+      # We skip these ones to save some computation
+      for (domain.n.vars in generate_variable_groupings(
+        n.domains,
+        n.vars,
+        min.vars.per.domain = 1,
+        max.vars.per.domain = 4,
+        ordered.except.for.first = 1
+      )) {
+        for (corr.intra in (c(0.4))) {
+          for (corr.inter in (c(0, 0.2, 0.4))) {
+            TRIAL[[paste0(
+              "D=", n.domains,
+              ".V=", n.vars,
+              ".Vd=", paste(domain.n.vars, collapse = "_"),
+              ".ρ=(", corr.intra, ")",
+              ".τ=(", corr.inter, ")",
+              ".N=", n.per.group,
+              ".extra=none"
+            )]] <-
+              make_endpoints(
+                n.domains = n.domains,
+                domain.n.vars = domain.n.vars,
+                corr.intra = corr.intra,
+                corr.inter = corr.inter
+              ) %>% with_n_patients(per.group = n.per.group)
+
+            if (domain.n.vars[1] < 4) {
+              TRIAL[[paste0(
+                "D=", n.domains,
+                ".V=", n.vars,
+                ".Vd=", paste(domain.n.vars, collapse = "_"),
+                ".ρ=(", corr.intra, ")",
+                ".τ=(", corr.inter, ")",
+                ".N=", n.per.group,
+                ".extra=in_first_domain"
+              )]] <-
+                make_endpoints(
+                  n.domains = n.domains,
+                  domain.n.vars = {
+                    dnv <- domain.n.vars
+                    dnv[1] <- dnv[1] + 1
+                    dnv
+                  },
+                  vars.sd = c(
+                    rep(1, length.out = domain.n.vars[1]),
+                    2,
+                    rep(1, length.out = sum(domain.n.vars) - domain.n.vars[1])
+                  ),
+                  corr.intra = corr.intra,
+                  corr.inter = corr.inter
+                ) %>% with_n_patients(per.group = n.per.group)
+            }
+
+            if (n.domains < 5) {
+              TRIAL[[paste0(
+                "D=", n.domains,
+                ".V=", n.vars,
+                ".Vd=", paste(domain.n.vars, collapse = "_"),
+                ".ρ=(", corr.intra, ")",
+                ".τ=(", corr.inter, ")",
+                ".N=", n.per.group,
+                ".extra=in_own_domain"
+              )]] <-
+                make_endpoints(
+                  n.domains = n.domains + 1,
+                  domain.n.vars = c(domain.n.vars, 1),
+                  vars.sd = c(rep(1, length.out = sum(domain.n.vars)), 2),
+                  corr.intra = corr.intra,
+                  corr.inter = corr.inter
+                ) %>% with_n_patients(per.group = n.per.group)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+parse_dot_name <- function(name) {
+  res <- stringr::str_match_all(name, "(([^.=]+)=([^().=]+|\\(([^)]+)\\)))*")[[1]]
+  ii <- !is.na(res[, 3])
+  res <- structure(
+    coalesce(res[ii, 5], res[ii, 4]),
+    names = res[ii, 3]
+  ) %>% as.list()
+  res <- lapply(res, function(v) {
+    # if(stringr::str_detect(v, "^([0-9.]+_)*[0-9.]+$")) {
+    if (stringr::str_detect(v, "^[0-9.]+$")) {
+      n <- as.numeric(stringr::str_split(v, "_", simplify = TRUE))
+      # if(length(n) > 1) list(n) else n
+      n
+    } else {
+      v
+    }
+  }) %>% as_tibble_row()
+  res$Vd <- as.character(res$Vd)
+  res
+}
+bind_rows(lapply(names(TRIAL), function(x) {
+  bind_cols(
+    tibble_row(trial.name = x),
+    parse_dot_name(x)
+  )
+}))
+```
+
+```{r}
+
+uni_adj <- make_schema_alias("uni_adj")
+dealias.uni_adj <- function(...) {
+  p_policy(
+    stop.if = for_all_endpoints(p_univariate %>% has_stop()),
+    go.if =
+      at_least_1_adjusted(
+        at_each_endpoint(p_univariate %>% has_go()),
+        correction = "simes"
+      )
+  )
+}
+
+uni_adj_extra <- make_schema_alias("uni_adj_extra")
+dealias.uni_adj_extra <- function(...) {
+  p_policy(
+    stop.if = (uni_adj %>% has_stop() %>%
+      at_selected_vars(all_but_last_var)) %or%
+      (p_not(uni_adj %>% has_go() %>%
+        at_selected_vars(all_but_last_var)) %and%
+        (p_univariate %>% has_stop() %>% at_selected_vars(last_var))),
+    go.if = ((uni_adj %>% has_go()) %>%
+      at_selected_vars(all_but_last_var)) %or%
+      (p_univariate %>% has_go() %>% at_selected_vars(last_var))
+  )
+}
+
+
+uni_adj_only_stop <- make_schema_alias("uni_adj_only_stop")
+dealias.uni_adj_only_stop <- function(...) {
+  p_policy(
+    stop.if = (uni_adj %>% has_stop() %>%
+      at_selected_vars(all_but_last_var)) %or%
+      (p_not(uni_adj %>% has_go() %>%
+        at_selected_vars(all_but_last_var)) %and%
+        (p_univariate %>% has_stop() %>% at_selected_vars(last_var))),
+    go.if = (uni_adj %>% has_go()) %>%
+      at_selected_vars(all_but_last_var)
+  )
+}
+
+POLICY <- list(
+  uni_adj = uni_adj,
+  uni_adj_extra = uni_adj_extra,
+  all_domains_equal =
+    p_policy(
+      stop.if =
+        at_most_k(k = "z", at_each_domain(uni_adj %>% is_Go())) %or%
+          p_all(at_each_domain(uni_adj %>% is_Stop())),
+      go.if =
+        (at_least_k(k = "x", at_each_domain(uni_adj %>% is_Go())) %or%
+          p_all(at_each_domain(uni_adj %>% is_Go()))) %and%
+          none_of(at_each_endpoint(is_negatively_significant))
+    ),
+  hierarchical_domains =
+    p_policy(
+      stop.if =
+        ((uni_adj %>% is_Stop()) %at_domain% "d1") %and%
+          # 2 of the other domains are stop (3 including the first one)
+          at_least_k(k = 1 + 2, at_each_domain(uni_adj %>% is_Stop())),
+      go.if =
+        (((uni_adj %>% is_Go()) %at_domain% "d1") %or%
+          # x of the other domains ~ x of all domains (otherwise the first condition holds)
+          at_least_k(k = "x", at_each_domain(uni_adj %>% is_Go()))) %and%
+          none_of(at_each_endpoint(is_negatively_significant))
+    )
+)
+
+for (schema.name in c("uni_adj", "uni_adj_extra", "uni_adj_only_stop")) {
+  schema <- make_schema_alias(schema.name)
+  POLICY[[paste0("all_domains_equal.", schema.name)]] <-
+    p_policy(
+      stop.if = at_most_k_of(
+        k = "z",
+        (schema %>% is_Go()) %at_domain% "d1",
+        at_each_domain(uni_adj %>% is_Go()) %at_domains% (!"d1")
+      ) %or%
+        p_all_of(
+          (schema %>% is_Stop()) %at_domain% "d1",
+          at_each_domain(uni_adj %>% is_Stop()) %at_domains% (!"d1")
+        ),
+      go.if =
+        (at_least_k_of(
+          k = "x",
+          (schema %>% is_Go()) %at_domain% "d1",
+          at_each_domain(uni_adj %>% is_Go()) %at_domains% (!"d1")
+        ) %or%
+          p_all_of(
+            (schema %>% is_Go()) %at_domain% "d1",
+            at_each_domain(uni_adj %>% is_Go()) %at_domains% (!"d1")
+          ))
+        %and%
+          none_of(at_each_endpoint(is_negatively_significant))
+    )
+
+  POLICY[[paste0("hierarchical_domains.", schema.name)]] <-
+    p_policy(
+      stop.if =
+        ((schema %>% is_Stop()) %at_domain% "d1") %and%
+          # 2 of the other domains are stop (3 including the first one)
+          (at_least_k(k = 2, at_each_domain(uni_adj %>% is_Stop())) %at_domains% (!"d1")),
+      go.if =
+        (((schema %>% is_Go()) %at_domain% "d1") %or%
+          # x of the other domains ~ x of all domains (otherwise the first condition holds)
+          (at_least_k(k = "x", at_each_domain(uni_adj %>% is_Go())) %at_domains% (!"d1")))
+        %and% none_of(at_each_endpoint(is_negatively_significant))
+    )
+}
+```
+
+```{r}
+go.regions <- list(
+  go.A = effect_is_gt("tv"),
+  go.B = (effect_is_gt("tv") %or% at_least_k(
+    k = 2,
+    at_each_domain(effect_is_gt("tv"))
+  )) %and%
+    for_all_endpoints(effect_is_gt(0)),
+  go.C = (at_least_k(k = 2, at_each_domain(effect_is_gt("tv"))) %or% effect_is_gt("tv")) %and%
+    for_all_endpoints(effect_is_gt(0)) %and%
+    (effect_is_gt("tv") %at_domain% "d1")
+)
+stop.regions <- list(
+  stop.A = effect_is_lt("lrv"),
+  stop.C = effect_is_lt(0),
+  stop.H = for_all_endpoints(effect_is_lt("lrv")) %and%
+    (at_least_k(k = 2, at_each_domain(effect_is_lt(0))) %or% effect_is_lt(0)) %and%
+    (effect_is_lt("0") %at_domain% "d1")
+)
+
+DEFAULT.PARAMS <- list(
+  "p.FS" = 0.1, "p.FG" = 0.2, "alpha" = 0.05,
+  "x" = 2, "z" = 0
+)
+```
+
+```{r}
+GET.SCENARIO <- function(trial.name) {
+  trial <- TRIAL[[trial.name]]
+  make_scenario(
+    trial = trial,
+    go.regions = go.regions,
+    stop.regions = stop.regions
+  ) %>% expand_regions()
+}
+# for(scenario.name in names(TRIAL)) {
+#   message(scenario.name)
+#   GET.SCENARIO(scenario.name)
+# }
+```
+
+```{r}
+GET.SIM <- function(scenario.name, policy.name) {
+  # if(n_domains(TRIAL[[scenario.name]]) <= 1) { return(NULL)  }
+  scenario <- GET.SCENARIO(scenario.name)
+  policy.schema <- POLICY[[policy.name]]
+  sim <- run_experiment_inline(paste0(
+    "sim_20220225_1436",
+    "_",
+    scenario.name,
+    "_",
+    policy.name
+  ),
+  function(N, cores, splits) {
+    scenario %>%
+      simulate_with_policy(policy.schema,
+        N = N,
+        cores = cores,
+        splits = splits,
+        verbose = TRUE,
+        simulate.fast = TRUE
+      )
+  },
+  N = 10000, cores = 1, splits = 1,
+  # quick.test = function(f) f(N = 5, cores = 1,splits=1),
+  depends.on = list(
+    scenario.name, policy.name,
+    paste0(scenario$region.points$region.name, collapse = "|")
+  ),
+  depend.on.function = FALSE,
+  random.seed = 202202231356 %% 2^31
+  )
+  sim
+}
+```
+
+
+```{r}
+SIM.VERSION <- "sim_20220302_0849_25r_SCENARIO_METRICS"
+names.TRIAL <- names(TRIAL)
+# n <- n[stringr::str_starts(n,"D=5.V=10")]
+
+GET.METRICS <- function(scenario.name, policy.name) {
+  sim.name <- paste0(scenario.name, ".", policy.name)
+  system(paste0("echo 'Computing metrics for ", sim.name, "'"))
+  res <- run_experiment_inline(
+    depend.on.function = FALSE,
+    paste0(SIM.VERSION, "_", sim.name),
+    function() {
+      sim <- GET.SIM(scenario.name, policy.name)
+      if (is.null(sim)) {
+        return(NULL)
+      }
+      PARAMS <- list(
+        default = DEFAULT.PARAMS
+      )
+      lapply(names(PARAMS), function(params.name) {
+        params <- PARAMS[[params.name]]
+        sim.with.params <- sim %>% with_params(params)
+        sim.with.params %>%
+          four_metrics_all() %>%
+          mutate(
+            scenario = !!scenario.name,
+            policy = !!policy.name,
+            params = !!params.name,
+            .before = everything()
+          )
+      }) %>% bind_rows()
+    }
+  )
+  if (!is.null(res)) {
+    res %>%
+      summarise(
+        parse_dot_name(!!scenario.name) %>%
+          rename_with(function(x) paste0("scenario.", x)),
+        cur_data()
+      )
+  } else {
+    NULL
+  }
+}
+```
+  
+# Table 3.9 : The effect of including ("inc.low" column) an additional variable of low pwer in its own domain (σ=2, power=0.3) when all the existing variables have high power (σ=1, power 0.8).
+(table_domain_n_vars_comb_all_domains_equal_inter_0.2_low_own.tex,
+ table_domain_n_vars_comb_hierarchical_domains_inter_0.2_low_own.tex)
+
+```{r} 
+options(knitr.table.format = "latex")
+library(kableExtra)
+library(doParallel)
+registerDoParallel(cores = 8)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+format_range <- function(xs, digits, culprits = NULL, type) {
+  if (type == "F") {
+    paste0(
+      format_round(max(xs), digits),
+      " {\\footnotesize -", format_round(max(xs) - min(xs), digits), "}"
+    )
+  } else {
+    paste0(
+      format_round(min(xs), digits),
+      " {\\footnotesize +", format_round(max(xs) - min(xs), digits), "}"
+    )
+  }
+}
+SCENARIO.METRICS.in_own_domain <-
+  foreach(scenario.name = names.TRIAL, .combine = "bind_rows") %:%
+  foreach(policy.name = names(POLICY), .combine = "bind_rows") %dopar% {
+    data <- parse_dot_name(scenario.name)
+    if (data$D <= 4 & data$`ρ` == 0.4 & data$`τ` == 0.2 &
+      policy.name %in% c("all_domains_equal", "hierarchical_domains", "uni_adj") &
+      !(data$D >= 2 & policy.name %in% c("uni_adj")) &
+      data$extra %in% c("none", "in_own_domain")) {
+      GET.METRICS(scenario.name, policy.name)
+    } else {
+      NULL
+    }
+  }
+
+for (policy in c("all_domains_equal", "hierarchical_domains")) {
+  for (`scenario.τ` in c(0.2)) {
+    # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+    for (params in c("default")) {
+      df <- SCENARIO.METRICS.in_own_domain %>%
+        # filter(scenario.vars == !!scenario.vars) %>%
+        # filter(params   == !!params) %>%
+        filter(policy == "all_domains_equal" & scenario.D == 2 & scenario.V %in% c(2, 4, 6, 8) |
+          policy == "all_domains_equal" & scenario.D == 3 & scenario.V %in% c(3, 6, 9) |
+          policy == "all_domains_equal" & scenario.D == 4 & scenario.V %in% c(4, 6, 9) |
+          policy == "hierarchical_domains" & scenario.D == 3 & scenario.V %in% c(3, 6, 9) |
+          policy == "hierarchical_domains" & scenario.D == 4 & scenario.V %in% c(4, 6, 9)) %>%
+        filter(scenario.D <= 4) %>%
+        filter(scenario.D > 1) %>%
+        filter(!(scenario.D <= 2 & !!policy == "hierarchical_domains")) %>%
+        filter((scenario.D == 1 & scenario.extra == "none" & policy == "uni_adj") |
+          ((scenario.D >= 2 | scenario.extra == "in_own_domain") & policy == !!policy)) %>%
+        filter(`scenario.τ` == !!`scenario.τ`) %>%
+        filter(`scenario.ρ` == 0.4) %>%
+        filter(params == !!params) %>%
+        filter(scenario.extra %in% c("none", "in_own_domain")) %>%
+        group_by(scenario.D, scenario.V, scenario.extra) %>%
+        summarise(
+          CSr.0    = format_range(CSr.stop.C, 2, culprits = scenario.Vd, type = "C"),
+          FGr.LRV  = format_range(FGr.stop.A, 2, culprits = scenario.Vd, type = "F"),
+          CGr.TV   = format_range(CGr.go.A, 2, culprits = scenario.Vd, type = "C")
+          # FGr.TV1  = format_range(FGr.stop.D, 2, culprits=scenario.Vd, type="F"),
+          # CGr.TV2  = format_range(CGr.go.B, 2, culprits=scenario.Vd, type="C")
+        ) %>%
+        ungroup() %>%
+        arrange(scenario.D) %>%
+        pivot_wider(values_from = c("CSr.0", "FGr.LRV", "CGr.TV"), names_from = scenario.extra, names_sep = ".")
+      print(df)
+
+      table <- kbl(df %>% mutate(
+        scenario.D = NULL,
+        V = scenario.V,
+        scenario.V = NULL,
+        .before = everything()
+      ) %>%
+        mutate(
+          CSr.0.none = cell_spec(CSr.0.none, bold = df$CSr.0.none > df$CSr.0.in_own_domain, escape = F, format = "latex"),
+          CSr.0.in_own_domain = cell_spec(CSr.0.in_own_domain, bold = df$CSr.0.none < df$CSr.0.in_own_domain, escape = F, format = "latex"),
+          FGr.LRV.none = cell_spec(FGr.LRV.none, bold = df$FGr.LRV.none < df$FGr.LRV.in_own_domain, escape = F, format = "latex"),
+          FGr.LRV.in_own_domain = cell_spec(FGr.LRV.in_own_domain, bold = df$FGr.LRV.none > df$FGr.LRV.in_own_domain, escape = F, format = "latex"),
+          CGr.TV.none = cell_spec(CGr.TV.none, bold = df$CGr.TV.none > df$CGr.TV.in_own_domain, escape = F, format = "latex"),
+          CGr.TV.in_own_domain = cell_spec(CGr.TV.in_own_domain, bold = df$CGr.TV.none < df$CGr.TV.in_own_domain, escape = F, format = "latex")
+        ) %>%
+        relocate( # "with.neg" = FGr.LRV.in_own_domain,
+          V = V,
+          "exc.low" = CSr.0.none,
+          "inc.low" = CSr.0.in_own_domain,
+          "exc.low  " = FGr.LRV.none,
+          "inc.low  " = FGr.LRV.in_own_domain,
+          "exc.low " = CGr.TV.none,
+          "inc.low " = CGr.TV.in_own_domain
+        ),
+      "latex",
+      booktabs = T, escape = FALSE
+      )
+
+      for (scenario.D in unique(df$scenario.D)) {
+        table <- table %>% pack_rows(
+          paste0("D=", scenario.D),
+          min(which(df$scenario.D == scenario.D)),
+          max(which(df$scenario.D == scenario.D))
+        )
+      }
+      # table <- table %>% collapse_rows(columns = 1,  latex_hline = "major")
+      table <- table %>% add_header_above(c(
+        " " = 1, # "Parameters"=0,
+        "$\\\\CSr$ at $\\\\downcone{\\\\vNoEffect}$" = 2,
+        "$\\\\FGr$ at $\\\\downcone{\\\\vLRV}$" = 2,
+        "$\\\\CGr$ at $\\\\upcone{\\\\vTV}$" = 2
+      ), escape = F)
+      table <- table %>% kable_styling(
+        latex_options = "striped", position = "left" # ,
+        # stripe_index = which(df$scenario.V %in% c(2,4,6,10))
+      )
+      table <- table %>% column_spec(c(3, 5), border_right = T)
+      file.name <- paste0("report/table_domain_n_vars_comb_", policy, "_inter_", `scenario.τ`, "_low_own.tex")
+      table %>% save_kable(file = file.name)
+      cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+    }
+  }
+}
+```
+
+# Table 3.10: The inpact of including (inc.low column) an additional variable of low power (σ = 2, power = 0.3) in an existing domain when all the existing variables have high power (σ = 1, power 0.8).
+(table_domain_n_vars_comb_all_domains_equal_inter_0.2_low_first_at_0LRVTV.tex,
+ table_domain_n_vars_comb_hierarchical_domains_inter_0.2_low_first_at_0LRVTV.tex)
+
+```{r} 
+options(knitr.table.format = "latex")
+library(kableExtra)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+format_range <- function(xs, digits, culprits = NULL, type) {
+  if (type == "F") {
+    paste0(
+      format_round(max(xs), digits),
+      " {\\footnotesize -", format_round(max(xs) - min(xs), digits), "}"
+    )
+  } else {
+    paste0(
+      format_round(min(xs), digits),
+      " {\\footnotesize +", format_round(max(xs) - min(xs), digits), "}"
+    )
+  }
+}
+
+SCENARIO.METRICS.in_first_domain <-
+  foreach(scenario.name = names.TRIAL, .combine = "bind_rows") %:%
+  foreach(policy.name = names(POLICY), .combine = "bind_rows") %dopar% {
+    data <- parse_dot_name(scenario.name)
+    if (data$D <= 5 & data$`ρ` == 0.4 & data$`τ` == 0.2 &
+      !(data$D >= 2 & policy.name %in% c("uni_adj", "uni_adj_extra")) &
+      data$extra %in% c("none", "in_first_domain")) {
+      GET.METRICS(scenario.name, policy.name)
+    } else {
+      NULL
+    }
+  }
+
+approach.suffix <- c("uni_adj")
+for (policy in c("all_domains_equal", "hierarchical_domains")) {
+  for (`scenario.τ` in c(0.2)) {
+    # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+    for (params in c("default")) {
+      df <- SCENARIO.METRICS.in_first_domain %>%
+        # filter(scenario.vars == !!scenario.vars) %>%
+        # filter(params   == !!params) %>%
+        filter(stringr::str_starts(policy, "all_domains_equal") & scenario.D == 2 & scenario.V %in% c(2, 4, 7) |
+          stringr::str_starts(policy, "all_domains_equal") & scenario.D == 3 & scenario.V %in% c(3, 6, 9) |
+          stringr::str_starts(policy, "all_domains_equal") & scenario.D == 4 & scenario.V %in% c(4, 7, 9) |
+          stringr::str_starts(policy, "all_domains_equal") & scenario.D == 5 & scenario.V %in% c(5, 7, 9) |
+          stringr::str_starts(policy, "hierarchical_domains") & scenario.D == 3 & scenario.V %in% c(3, 6, 9) |
+          stringr::str_starts(policy, "hierarchical_domains") & scenario.D == 4 & scenario.V %in% c(4, 7, 9) |
+          stringr::str_starts(policy, "hierarchical_domains") & scenario.D == 5 & scenario.V %in% c(5, 7, 9)) %>%
+        filter(scenario.D > 1) %>%
+        filter(scenario.D <= 5) %>%
+        filter(!(scenario.D <= 2 & !!policy == "hierarchical_domains")) %>%
+        filter(!(stringr::str_starts(scenario.Vd, "4"))) %>%
+        filter((scenario.extra == "none" & ((scenario.D == 1 & policy == "uni_adj") |
+          (scenario.D >= 2 & policy == !!policy))) |
+          (scenario.extra == "in_first_domain" &
+            ((scenario.D == 1 & policy %in% !!approach.suffix) |
+              (scenario.D >= 2 & policy %in% paste0(!!policy, ".", !!approach.suffix))))) %>%
+        mutate(policy.suffix = stringr::str_replace(pattern = paste0("^", !!policy, "\\.?"), replacement = "", string = policy)) %>%
+        select(!policy) %>%
+        filter(`scenario.τ` == !!`scenario.τ`) %>%
+        filter(`scenario.ρ` == 0.4) %>%
+        filter(params == !!params) %>%
+        filter(scenario.extra %in% c("none", "in_first_domain")) %>%
+        group_by(scenario.D, scenario.V, scenario.extra, policy.suffix) %>%
+        summarise(
+          CSr.0    = format_range(CSr.stop.C, 2, culprits = scenario.Vd, type = "C"),
+          FGr.0    = format_range(FGr.stop.C, 2, culprits = scenario.Vd, type = "F"),
+          FGr.LRV  = format_range(FGr.stop.A, 2, culprits = scenario.Vd, type = "F"),
+          CGr.TV   = format_range(CGr.go.A, 2, culprits = scenario.Vd, type = "C")
+          # FGr.TV1  = format_range(FGr.stop.D, 2, culprits=scenario.Vd, type="F"),
+          # CGr.TV2  = format_range(CGr.go.B, 2, culprits=scenario.Vd, type="C")
+        ) %>%
+        ungroup() %>%
+        group_by(scenario.D, scenario.V) %>%
+        mutate(
+          CSr.0.is.best    = CSr.0 == max(CSr.0) & !all(CSr.0 == max(CSr.0)),
+          FGr.0.is.best    = FGr.0 == min(FGr.0) & !all(FGr.0 == min(FGr.0)),
+          FGr.LRV.is.best  = FGr.LRV == min(FGr.LRV) & !all(FGr.LRV == min(FGr.LRV)),
+          CGr.TV.is.best   = CGr.TV == max(CGr.TV) & !all(CGr.TV == max(CGr.TV))
+          # FGr.TV1  = format_range(FGr.stop.D, 2, culprits=scenario.Vd, type="F"),
+          # CGr.TV2  = format_range(CGr.go.B, 2, culprits=scenario.Vd, type="C")
+        ) %>%
+        rowwise() %>%
+        mutate(
+          CSr.0.cell = cell_spec(CSr.0, bold = CSr.0.is.best, escape = F, format = "latex"),
+          FGr.0.cell = cell_spec(FGr.0, bold = FGr.0.is.best, escape = F, format = "latex"),
+          FGr.LRV.cell = cell_spec(FGr.LRV, bold = FGr.LRV.is.best, escape = F, format = "latex"),
+          CGr.TV.cell = cell_spec(CGr.TV, bold = CGr.TV.is.best, escape = F, format = "latex")
+        ) %>%
+        ungroup() %>%
+        arrange(scenario.D) %>%
+        pivot_wider(values_from = starts_with(c("CSr", "FGr", "CGr")), names_from = c("scenario.extra", "policy.suffix"), names_sep = ".")
+      print(df)
+
+      table3 <- kbl(df %>% transmute(
+        V = scenario.V,
+        "exc.low" = CSr.0.cell.none.,
+        "inc.low" = CSr.0.cell.in_first_domain.uni_adj,
+        "exc.low " = FGr.LRV.cell.none.,
+        "inc.low " = FGr.LRV.cell.in_first_domain.uni_adj,
+        "exc.low  " = CGr.TV.cell.none.,
+        "inc.low  " = CGr.TV.cell.in_first_domain.uni_adj,
+      ),
+      "latex",
+      booktabs = T, escape = FALSE
+      )
+      table3 <- table3 %>% add_header_above(c(
+        " " = 1, # "Parameters"=0,
+        "$\\\\CSr$ at $\\\\downcone{\\\\vNoEffect}$" = 2,
+        "$\\\\FGr$ at $\\\\downcone{\\\\vLRV}$" = 2,
+        "$\\\\CGr$ at $\\\\upcone{\\\\vTV}$" = 2
+      ), escape = FALSE)
+
+      for (combo in list( # list(file.suffix = "at_0", table = table1),
+        # list(file.suffix = "at_LRVTV", table = table2),
+        list(file.suffix = "at_0LRVTV", table = table3)
+      )) {
+        list2env(combo, environment())
+        for (scenario.D in unique(df$scenario.D)) {
+          table <- table %>% pack_rows(
+            paste0("D=", scenario.D),
+            min(which(df$scenario.D == scenario.D)),
+            max(which(df$scenario.D == scenario.D))
+          )
+        }
+
+
+        table <- table %>% kable_styling(
+          latex_options = "striped", position = "left" # ,
+          # stripe_index = which(df$scenario.V %in% c(2,4,6,10))
+        )
+        table <- table %>% column_spec(c(3, 5), border_right = T)
+        file.name <- paste0("report/table_domain_n_vars_comb_", policy, "_inter_", `scenario.τ`, "_low_first_", file.suffix, ".tex")
+        table %>% save_kable(file = file.name)
+        cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+      }
+    }
+  }
+}
+```

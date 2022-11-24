@@ -1,0 +1,5 @@
+devtools::document()
+devtools::load_all()
+options(Ncpus = 16)
+options(mc.cores = 16)
+devtools::test()

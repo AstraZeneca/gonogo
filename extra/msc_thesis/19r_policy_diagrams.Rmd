@@ -1,0 +1,202 @@
+---
+title: "Figures concerning rates"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r, results= "hide", message=F, warning=F}
+library(gonogo)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(tidyr)
+options(dplyr.summarise.inform = FALSE)
+library(latex2exp)
+library(knitr)
+library(kableExtra)
+```
+
+```{r}
+system(paste("echo '", gonogo_version(), "'"))
+```
+
+```{r}
+TRIAL <- list()
+for (n.per.group in c(17, 51)) {
+  for (domain.n.vars in c(2)) {
+    for (corr.intra in (c(0, 0.4, 0.8))) {
+      TRIAL[[paste0("V=", domain.n.vars, ".ρ=(", corr.intra, ")", ".N=", n.per.group)]] <-
+        make_endpoints(
+          n.domains = 1,
+          domain.n.vars = domain.n.vars,
+          corr.intra = corr.intra
+        ) %>% with_n_patients(per.group = n.per.group)
+    }
+  }
+}
+
+for (domain.n.vars in c(2)) {
+  for (corr.intra in (c(0, 0.4, 0.8))) {
+    n.low.pow <- 1
+    TRIAL[[paste0("V=", domain.n.vars, ".ρ=(", corr.intra, ")", ".N=17.mixed")]] <-
+      make_endpoints(
+        n.domains = 1,
+        domain.n.vars = domain.n.vars,
+        vars.sd = c(
+          rep(1, domain.n.vars - n.low.pow),
+          rep(2, n.low.pow)
+        ),
+        corr.intra = corr.intra
+      ) %>% with_n_patients(per.group = 17)
+  }
+}
+
+for (domain.n.vars in c(2)) {
+  for (corr.intra in (c(0, 0.4, 0.8))) {
+    n.low.pow <- 1
+    n.high.pow <- 1
+    TRIAL[[paste0("V=", domain.n.vars, ".ρ=(", corr.intra, ")", ".N=17.hilo")]] <-
+      make_endpoints(
+        n.domains = 1,
+        domain.n.vars = domain.n.vars,
+        vars.sd = c(
+          rep(0.5, n.high.pow),
+          rep(1, domain.n.vars - n.low.pow - n.high.pow),
+          rep(2, n.low.pow)
+        ),
+        corr.intra = corr.intra
+      ) %>% with_n_patients(per.group = 17)
+  }
+}
+```
+
+```{r}
+POLICY <- list(
+  uni = p_policy(
+    stop.if   = for_all_endpoints(p_univariate %>% is_Stop()),
+    go.if     = for_at_least_1_endpoint(p_univariate %>% is_Go())
+  ),
+  uni.adj =
+    p_policy(
+      stop.if = for_all_endpoints(p_univariate %>% has_stop()),
+      go.if =
+        at_least_1_adjusted(
+          at_each_endpoint(p_univariate %>% has_go()),
+          correction = "simes"
+        )
+    ),
+  uni.bon =
+    p_policy(
+      stop.if = for_all_endpoints(p_univariate %>% has_stop()),
+      go.if =
+        at_least_1_adjusted(
+          at_each_endpoint(p_univariate %>% has_go()),
+          correction = "bonferroni"
+        )
+    ),
+  hot = p_hotelling(
+    false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  lik = p_likelihood(
+    false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  meas = p_measure(
+    false.stop = for_at_least_1_endpoint(is_gt("tv")),
+    false.go   = for_all_endpoints(effect_is_lt("lrv"))
+  ),
+  lik.adj =
+    p_likelihood_adj(
+      false.stop = for_at_least_1_endpoint(effect_is_gt("tv")),
+      false.go   = for_all_endpoints(effect_is_lt("lrv")),
+      df.go      = "max",
+      df.stop    = 1
+    )
+)
+```
+
+```{r}
+DEFAULT.PARAMS <- list("p.FS" = 0.1, "p.FG" = 0.2)
+```
+
+# Figure 3.2 - Go and Stop regions of unadjusted multivariate policies for V=2, σ₁ = σ₂ = 1, N = 17
+# Figure 3.4 - Go and stop regions for adjusted multivariate policies with V=2, N = 17.
+```{r}
+build <- tibble::tribble(
+  ~policy, ~trial,
+  "uni", "V=2.ρ=(0).N=17",
+  "hot", "V=2.ρ=(0).N=17",
+  "meas", "V=2.ρ=(0).N=17",
+  "lik", "V=2.ρ=(0).N=17",
+  "uni.adj", "V=2.ρ=(0).N=17",
+  "lik.adj", "V=2.ρ=(0).N=17",
+  "uni.bon", "V=2.ρ=(0).N=17",
+  ## Correlation and power
+  "uni.adj", "V=2.ρ=(0.8).N=17",
+  "lik.adj", "V=2.ρ=(0.8).N=17",
+  "uni.bon", "V=2.ρ=(0).N=17.mixed",
+  "uni.adj", "V=2.ρ=(0).N=17.mixed",
+  "lik.adj", "V=2.ρ=(0).N=17.mixed",
+  "uni.adj", "V=2.ρ=(0.8).N=17.mixed",
+  "lik.adj", "V=2.ρ=(0.8).N=17.mixed",
+  "uni", "V=2.ρ=(0).N=17.hilo",
+  "uni.adj", "V=2.ρ=(0).N=17.hilo",
+  "uni.bon", "V=2.ρ=(0).N=17.hilo",
+  "lik.adj", "V=2.ρ=(0).N=17.hilo",
+  "uni.adj", "V=2.ρ=(0.8).N=17.hilo",
+  "lik.adj", "V=2.ρ=(0.8).N=17.hilo"
+)
+
+build$name <- stringr::str_replace_all(paste0(build$policy, "_", build$trial), "\\.", "_")
+pic <- list()
+for (i in seq(nrow(build))) {
+  grid.hyp.opt <- run_experiment_inline("sim_20220204_1239",
+    function(cores, resolution) {
+      run_montecarlo_grid_schema(
+        TRIAL[[build[[i, "trial"]]]],
+        schema = POLICY[[build[[i, "policy"]]]],
+        params = DEFAULT.PARAMS,
+        cores = cores,
+        verbose = TRUE,
+        resolution = resolution
+      )
+    },
+    cores = 128, resolution = 0.02,
+    depends.on = list(build[i, c("policy", "trial")]),
+    quick.test = function(f) {
+      # f(cores = 1, resolution = 0.5)
+      TRUE
+    },
+    force.rerun = stringr::str_detect(pattern = "hilo", build[[i, "trial"]]) ||
+      build[[i, "policy"]] == "uni"
+  )
+  pic[[i]] <- plot_lalonde_grid(grid.hyp.opt) + coord_fixed() +
+    labs(
+      x = TeX(r'($\tilde{\mu}_1$)'),
+      y = TeX(r'($\tilde{\mu}_2$)'),
+    ) +
+    theme(legend.position = "bottom")
+  ## + ggtitle(build[[i,"name"]])
+  pic.legend <- cowplot::get_legend(pic[[i]])
+  pic[[i]] <- pic[[i]] + theme(legend.position = "none")
+
+  print(pic[[i]])
+  filename <- paste0("report/2d_", build[[i, "name"]], ".pdf")
+  ggsave(plot = pic[[i]], filename, device = cairo_pdf, width = 4, height = 4)
+  # knitr::plot_crop(filename)
+}
+# print(pic.legend)
+ggsave(plot = pic.legend, paste0("report/2d_legend.pdf"), device = cairo_pdf, width = 8, height = 0.7)
+# knitr::plot_crop("report/2d_legend.pdf")
+```
+
+
+```
+
+  

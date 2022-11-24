@@ -1,0 +1,49 @@
+Package: gonogo
+Type: Package
+Title: Decision policies with multiple endpoints
+Version: 0.1.0
+Author: Víctor López Juan
+Maintainer: Víctor López Juan <victor@lopezjuan.com>
+Description: Describe and simulate Go/No-Go decision policies with multiple endpoints,
+    generalizing the decision framework for a single endpoint proposed by Lalonde (2007).
+License: Apache License 2.0
+Encoding: UTF-8
+Depends:
+    R (>= 4.1)
+Imports:
+    abind (>= 1.4),
+    assertthat (>= 0.2.1),
+    cli (>= 3.1.0),
+    colorspace (>= 2.0),
+    digest (>= 0.6.28),
+    dplyr (>= 1.0.6),
+    fs (>= 1.5.0),
+    ggplot2 (>= 3.3.5),
+    matrixStats (>= 0.61.0),
+    methods,
+    MultinomialCI (>= 1.2),
+    mvtnorm (>= 1.1),
+    quadprog (>= 1.5),
+    RhpcBLASctl (>= 0.21),
+    qpdf,
+    rlang,
+    stats,
+    stringr (>= 1.4.0),
+    tibble (>= 3.1.2),
+    tidyr (>= 1.1.4),
+    tidyselect (>= 1.1.1),
+    vctrs (>= 0.3.8)
+Suggests:
+    asbio,
+    doParallel,
+    foreach,
+    printr (>= 0.2),
+    scales,
+    testthat,
+    knitr (>= 1.36),
+    latex2exp (>= 0.5.0)
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.1.2
+Config/testthat/edition: 3
+Config/testthat/parallel: true
+VignetteBuilder: knitr

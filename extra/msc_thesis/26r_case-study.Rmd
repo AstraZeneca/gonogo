@@ -1,0 +1,1425 @@
+---
+title: "Case study"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(gonogo)
+library(dplyr)
+library(tidyr)
+library(tibble)
+source("config.R")
+library(foreach)
+library(doParallel)
+stopImplicitCluster()
+cl <- makeForkCluster(nnodes = 32)
+registerDoParallel(cl, cores = 32)
+library(ggplot2)
+source("theme_pub.R")
+```
+```{r}
+system(paste("echo '", gonogo_version(), "'"))
+```
+
+In this vignette we use the `gonogo` library to design an early-stage clinical
+trial for the hypothetical cardiovascular drug `XGNG-0000`.
+
+The endpoint which will be used in the Phase III trial is 
+the number of major adverse cardiac events (MACE) events.
+The hazard ratio is defined as follows:
+
+\[HR = \frac{\# \text{MACE in treatment group}}{\# \text{MACE in control group}}\]
+
+Obtaining enough power with only this endpoint may require a too high
+number of patients for a Phase II trial. Therefore, a range of 
+addtional endpoints are used in addition to this one.
+
+Our framework only supports normally distributed endpoints such that
+TV > LRV > 0. However, it is possible to also handle log-normal distributed
+endpoints, and endpoints such that TV < LRV < 0 by performing the analysis
+on the transformed endpoints.
+
+
+Our framework only considers measurements that are taken at the patient level,
+and then aggregated; therefore the SD for an individual measurement is required.
+This entails difficulties for endpoints that are global, such as the overall number
+of events in an arm.
+In this case, the “synthetic” SD $\sqrt{N/2}·SE$ is used in place of the SD,
+where SE is the approximate $SE$ for the estimator $\hat{μ}$.
+
+Assuming a Poisson distribution
+and using the delta method, the logarithm of the Hazard ratio
+can be approximated as a normally-distributed variable with variance
+$\frac{2}{0.05·N}$, where $N$ is the number of patients per arm, and $0.05$ is
+the expected rate at which the events occur. This means that  
+$\sqrt{N/2}·SE = \sqrt{1/0.05}$.
+
+<!-- See: https://math.stackexchange.com/a/4121680 -->
+
+After the transformations, the endpoints sourced from 
+the clinicians are as follows:
+
+```{r}
+SOURCE <- tibble::tribble(
+  ~domain, ~variable, ~TV, ~LRV, ~"SD (or √{N/2}·SE)", ~units,
+  "Biomarker", "-log(NT.proBNP)", -log(1 - 0.15), -log(1 - 0.05), 0.8, "%",
+  "Exercise", "6MWD", 20, 12, 70, "m",
+  "Exercise", "VO2max", 1, 0.7, 2, "mℓ/min/kg",
+  "Well-being", "KCCQ.TSS", 5, 2, 20, "points",
+  "Imaging", "-GLS", 0.75, 0.25, 2.5, "p.p.",
+  "Imaging", "-LAVI", 2, 0.5, 7, "mℓ/m²",
+  "Imaging", "-LVMI", 8, 4, 12, "g/m²",
+  "Imaging", "LVEF", 4, 2, 10, "p.p.",
+  "Events", "-log(MACE.HR)", -log(0.8), -log(0.9), sqrt(1 / 0.05), "(HR)" # ,
+)
+SOURCE
+```
+
+```{r}
+assertthat::assert_that(all(SOURCE$TV > SOURCE$LRV))
+assertthat::assert_that(all(SOURCE$LRV > 0))
+```
+
+```{r}
+ENDPOINTS <- make_endpoints(
+  n.domains     = length(unique(SOURCE$domain)),
+  domain.n.vars = table(SOURCE$domain)[unique(SOURCE$domain)],
+  vars.sd       = SOURCE$`SD (or √{N/2}·SE)`,
+  vars.lrv      = SOURCE$LRV,
+  vars.tv       = SOURCE$TV,
+  domain.names  = unique(SOURCE$domain),
+  vars.names    = SOURCE$variable,
+  corr.intra    = 0.4,
+  corr.inter    = 0.2
+)
+ENDPOINTS$vars
+ENDPOINTS$sigma
+sqrt(diag(ENDPOINTS$sigma))
+```
+
+# Variable power
+
+
+```{r}
+TRIAL <- ENDPOINTS %>% with_n_patients(per.group = 3300)
+power_per_var(TRIAL, use.effect = "tv")
+```
+```{r}
+TRIAL <- ENDPOINTS %>% with_n_patients(per.group = 150)
+power_per_var(TRIAL, use.effect = "tv")
+```
+
+# Question
+
+What does it mean for VO2max to be most important? Should it be a domain of its own?
+
+```{r}
+uni_simes <- p_policy(
+  stop.if = p_all(at_each_endpoint(p_univariate %>% has_stop())),
+  go.if = at_least_1_adjusted(
+    at_each_endpoint(p_lalonde %>% has_go()),
+    correction = "simes"
+  )
+)
+
+uni_corr <- p_policy(
+  stop.if = p_all(at_each_endpoint(p_lalonde %>% is_Stop())),
+  go.if = at_least_1_corrected(
+    at_each_endpoint(p_lalonde %>% is_Go()),
+    level = "p.FG",
+    correction = "simes"
+  )
+)
+
+POLICIES <- tibble::lst(
+  all.domains.equal = p_policy(
+    go.if = at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Go())) %and%
+      none_of(at_each_endpoint(is_negatively_significant)),
+    stop.if = at_most_k_of(k = 0, at_each_domain(uni_simes %>% is_Go()))
+  ),
+  hierarchical.domains = p_policy(
+    go.if = ((uni_simes %>% is_Go() %at_domains% "Exercise")) %or%
+      (at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Go())) %at_domains% (!"Exercise")) %and%
+      none_of(at_each_endpoint(is_negatively_significant)),
+    stop.if = (uni_simes %>% is_Stop() %at_domains% ("Exercise")) %and%
+      (at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Stop())) %at_domains% (!"Exercise"))
+  ),
+  hierarchical.domains = p_policy(
+    go.if = ((uni_simes %>% is_Go() %at_domains% "Exercise")) %or%
+      (at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Go())) %at_domains% (!"Exercise")) %and%
+      none_of(at_each_endpoint(is_negatively_significant)),
+    stop.if = (uni_simes %>% is_Stop() %at_domains% ("Exercise")) %and%
+      (at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Stop())) %at_domains% (!"Exercise"))
+  ),
+  all.domains.equal.no.6MWD = all.domains.equal %at_vars% (!"6MWD"),
+  hierarchical.domains.no.6MWD = hierarchical.domains %at_vars% (!"6MWD"),
+  all.domains.equal.no.Events = p_policy(
+    stop.if = all.domains.equal %>% has_stop() %at_vars% (!"-log(MACE.HR)"),
+    go.if = (all.domains.equal %>% has_go() %at_vars% (!"-log(MACE.HR)")) %and%
+      p_not(is_negatively_significant %at_vars% "-log(MACE.HR)")
+  ),
+  hierarchical.domains.no.Events = p_policy(
+    stop.if = hierarchical.domains %>% has_stop() %at_vars% (!"-log(MACE.HR)"),
+    go.if = (hierarchical.domains %>% has_go() %at_vars% (!"-log(MACE.HR)")) %and%
+      p_not(is_negatively_significant %at_vars% "-log(MACE.HR)")
+  ),
+  all.domains.equal.no.Events.no.6MWD = all.domains.equal.no.Events %at_vars% (!"6MWD"),
+  hierarchical.domains.no.Events.no.6MWD = hierarchical.domains.no.Events %at_vars% (!"6MWD"),
+  all.domains.equal.no.Events.no.6MWD.no.LAVI = all.domains.equal.no.Events %at_vars% (!"6MWD" & !"-LAVI"),
+  hierarchical.domains.no.Events.no.6MWD.no.LAVI = hierarchical.domains.no.Events %at_vars% (!"6MWD" & !"-LAVI"),
+  all.domains.equal.no.Events.no.6MWD.adj.cond = p_policy(
+    go.if = all.domains.equal.no.Events.no.6MWD %>% has_go() %>%
+      # Disable the non-negativity condition
+      at_params(alpha = -Inf)
+      %and%
+      # Add non-negativity condition adjusted per domain
+      none_of(at_each_domain(
+        at_least_1_corrected(at_each_endpoint(is_negatively_significant),
+          level = "alpha",
+          correction = "simes"
+        )
+      )),
+    stop.if = all.domains.equal.no.Events.no.6MWD %>% has_stop()
+  ),
+  hierarchical.domains.no.Events.no.6MWD.adj.cond = p_policy(
+    go.if = hierarchical.domains.no.Events.no.6MWD %>% has_go() %>%
+      # Disable the non-negativity condition
+      at_params(alpha = -Inf)
+      %and%
+      # Add non-negativity condition adjusted per domain
+      none_of(at_each_domain(
+        at_least_1_corrected(at_each_endpoint(is_negatively_significant),
+          level = "alpha",
+          correction = "simes"
+        )
+      )),
+    stop.if = hierarchical.domains.no.Events.no.6MWD %>% has_stop()
+  )
+
+
+  # all.domains.equal.corr = p_policy(
+  #   go.if = at_least_k_of(k=2, at_each_domain(uni_corr %>% is_Go)) %and%
+  #     none_of(at_each_endpoint(is_negatively_significant)),
+  #   stop.if = at_most_k_of(k=0, at_each_domain(uni_corr %>% is_Go))),
+  #
+  # hierarchical.domains.corr = p_policy(
+  #   go.if   = ((uni_corr %>% is_Go %at_domains% "Exercise")) %or%
+  #     (at_least_k_of(k=2, at_each_domain(uni_corr %>% is_Go)) %at_domains% (!"Exercise"))  %and%
+  #     none_of(at_each_endpoint(is_negatively_significant)),
+  #
+  #   stop.if =  (uni_corr %>% is_Stop %at_domains% ("Exercise")) %and%
+  #     (at_least_k_of(k=2, at_each_domain(uni_corr %>% is_Stop)) %at_domains% (!"Exercise"))
+  # ),
+)
+
+
+for (domain.name in ENDPOINTS$domains$name) {
+  POLICIES[[paste0("at.", domain.name)]] <- (uni_simes %at_domain% domain.name)
+  POLICIES[[paste0("corr.at.", domain.name)]] <- (uni_corr %at_domain% domain.name)
+}
+
+for (vars.name in ENDPOINTS$vars$name) {
+  POLICIES[[paste0("at.", vars.name)]] <- (p_lalonde %at_var% vars.name)
+}
+
+PARAMS <- tibble::lst(
+  DEFAULT   = list(p.FS = 0.1, p.FG = 0.2, alpha = 0.05),
+  w.o.cond  = list(p.FS = 0.1, p.FG = 0.2, alpha = -Inf) # ,
+  # hard.cond = list(p.FS = 0.1, p.FG = 0.2, alpha = 0.1)
+)
+
+criteria_info(POLICIES$all.domains.equal, ENDPOINTS)
+criteria_info(POLICIES$hierarchical.domains.no.Events.no.6MWD, ENDPOINTS)
+params_info(POLICIES$hierarchical.domains.no.Events.no.6MWD.adj.cond, ENDPOINTS)
+params_info(POLICIES$hierarchical.domains.no.Events.no.6MWD.adj.cond, ENDPOINTS)
+```
+
+We start at a relatively high $N=30$.
+
+```{r}
+TRIALS <- lapply(
+  {
+    x <- seq(from = 10, to = 600, by = 5)
+    names(x) <- x
+    x
+  },
+  function(per.group) {
+    ENDPOINTS %>% with_n_patients(per.group = per.group)
+  }
+)
+
+TRIALS$`50`
+```
+
+These are the scenarios under which we will test:
+```{r}
+go.regions <- list(
+  all.TV = effect_is_gt("tv"),
+  # two.TV = at_least_k(k=2, r_at_each_domain(effect_is_gt("tv"))) %and%
+  #             effect_is_gt(0),
+  # Eve.Exc.et2.TV = (at_least_k(
+  #                k=2,
+  #                r_at_each_domain(effect_is_gt("tv"))) %at_domains% (!"Exercise" & !"Events")) %and%
+  #             (effect_is_gt("tv") %at_domain% "Exercise") %and%
+  #             (effect_is_gt("tv") %at_domain% "Events") %and%
+  #             (effect_is_gt(0)),
+  # Eve.Exc.et1.TV = (at_least_k(
+  #                k=1,
+  #                r_at_each_domain(effect_is_gt("tv"))) %at_domains% (!"Exercise" & !"Events")) %and%
+  #             (effect_is_gt("tv") %at_domain% "Exercise") %and%
+  #             (effect_is_gt("tv") %at_domain% "Events") %and%
+  #             (effect_is_gt(0)),
+  # Eve.Im.et1.TV = (at_least_k(
+  #   k=1,
+  #   r_at_each_domain(effect_is_gt("tv"))) %at_domains% (!"Events" & !"Imaging")) %and%
+  #   (effect_is_gt("tv") %at_domains% c("Events","Imaging")) %and%
+  #   (effect_is_gt(0)),
+  # Eve.et2.TV = (at_least_k(
+  #                k=2,
+  #                r_at_each_domain(effect_is_gt("tv"))) %at_domains% (!"Events")) %and%
+  #             (effect_is_gt("tv") %at_domain% "Events") %and%
+  #             (effect_is_gt(0)),
+  Eve.et3.TV = (at_least_k(
+    k = 3,
+    r_at_each_domain(effect_is_gt("tv"))
+  ) %at_domains% (!"Events")) %and%
+    (effect_is_gt("tv") %at_domain% "Events") %and%
+    (effect_is_gt(0))
+  # Exc.et3.TV = (at_least_k(
+  #                k=3,
+  #                r_at_each_domain(effect_is_gt("tv"))) %at_domains% (!"Exercise")) %and%
+  #             (effect_is_gt("tv") %at_domain% "Exercise") %and%
+  #             (effect_is_gt(0))
+)
+stop.regions <- list(
+  all.LRV = effect_is_lt("lrv"),
+  all.0 = effect_is_lt(0),
+  Eve.et3.0 = effect_is_lt("lrv") %and%
+    (effect_is_lt(0) %at_domains% "Events") %and%
+    (at_least_k(
+      k = 3,
+      r_at_each_domain(effect_is_lt(0))
+    ) %at_domains% (!"Events")),
+  unsafe = effect_is_lt("tv")
+)
+
+SCENARIOS <- foreach(i = seq_along(TRIALS), .combine = "c") %dopar% {
+  trial <- TRIALS[[i]]
+  trial.name <- names(TRIALS)[i]
+  res <- list()
+  res[[trial.name]] <- make_scenario(trial, go.regions = go.regions, stop.regions = stop.regions) %>% expand_regions()
+  res
+}
+
+SCENARIOS$`150`
+```
+
+
+```{r}
+GET.SIM <- function(scenario.name, policy.name, N = 10000) {
+  scenario <- SCENARIOS[[scenario.name]]
+  policy <- POLICIES[[policy.name]]
+  sim.id <- paste0("sim_20220322_1243_case_study_", scenario.name, "_", policy.name, "_N=", N)
+  run_experiment_inline(
+    sim.id,
+    depend.on.function = FALSE,
+    function() {
+      system(paste0("echo '", sim.id, "'"))
+      scenario %>%
+        simulate_with_policy(policy, N = N, simulate.fast = TRUE)
+    },
+    random.seed = 3839832
+  )
+}
+
+# foreach(scenario.name = names(SCENARIOS)) %:%
+#   foreach(policy.name = names(POLICIES)) %dopar% {
+#     res <- GET.SIM(scenario.name, policy.name)
+#     assertthat::assert_that(is(res,"Scenario"), msg=paste0("Error at  ",scenario.name, ",", policy.name))
+#   }
+
+
+GET.SIM.AGG <- function(scenario.name, policy.name, params.name = "DEFAULT", N = 50000) {
+  scenario <- SCENARIOS[[scenario.name]]
+  policy <- POLICIES[[policy.name]]
+  params <- PARAMS[[params.name]]
+  sim.id <- paste0(
+    "sim_20220322_1243_case_study_agg_", scenario.name, "_", policy.name, "_N=", N,
+    if (params.name == "DEFAULT") {
+      ""
+    } else {
+      paste0("_", params.name)
+    }
+  )
+  run_experiment_inline(
+    sim.id,
+    depend.on.function = FALSE,
+    function() {
+      system(paste0("echo '", sim.id, "'"))
+      sim <- GET.SIM(scenario.name, policy.name, N = N) %>%
+        with_params(params) %>%
+        aggregate_scenario() %>%
+        with(., tibble::lst(decisions.per.effect))
+    }
+  )
+}
+```
+
+```{r}
+
+# for(scenario.name in names(SCENARIOS)) {
+#   for(policy.name in names(POLICIES)) {
+#     res <- GET.SIM.AGG(scenario.name, policy.name)
+#     message("Success")
+#     assertthat::assert_that(is(res,"list"), msg=paste0("Error at  ",scenario.name, ",", policy.name))
+#   }
+# }
+foreach(scenario.name = names(SCENARIOS), .combine = "all") %:%
+  foreach(policy.name = names(POLICIES), .combine = "all") %dopar% {
+    foreach(params.name = names(PARAMS), .combine = "all") %do% {
+      # Do simulations on the same scenario-policy pair sequentially
+      res <- GET.SIM.AGG(scenario.name, policy.name, params.name)
+      message("Success")
+      assertthat::assert_that(is(res, "list"), msg = paste0("Error at  ", scenario.name, ",", policy.name))
+    }
+  }
+```
+
+### Data
+
+```{r}
+THRESHOLDS <- tibble::tribble(
+  ~correct.decision, ~threshold.name, ~p,
+  "Go", "90% Go", 1 - .9,
+  "Go", "80% Go", 1 - .8,
+  "Stop", "70% Stop", .7,
+  "Stop", "80% Stop", .8,
+  "Stop", "5% Go", 1 - .05
+)
+scale_linetype_thresholds <- function(include.only = NULL, ...) {
+  VALUES <- c(
+    "5% Go" = "dotted",
+    "70% Stop" = "dashed",
+    "80% Stop" = "twodash",
+    "90% Go" = "dotdash",
+    "80% Go" = "longdash"
+  )
+  if (is.null(include.only)) {
+    include.only <- names(VALUES)
+  }
+  scale_linetype_manual(values = VALUES[include.only], ...)
+}
+```
+
+# Figure 4.3 - Decision distribution of the domain subpolicies for the case study
+case_study_per_domain_policies_at..pdf
+
+```{r}
+for (prefix in c("at.", "corr.at."))
+{
+  d.levels <- c(
+    "Biomarker",
+    "Exercise",
+    # if(prefix == "at.") "VO2max" else NULL,
+    "Well-being",
+    "Imaging",
+    "Events"
+  )
+  SIM <- foreach(scenario.name = names(SCENARIOS), .combine = "bind_rows") %:%
+    foreach(
+      policy.name = sapply(d.levels, function(domain.name) paste0(prefix, domain.name)),
+      .combine = "bind_rows"
+    ) %dopar% {
+      GET.SIM.AGG(scenario.name, policy.name)$decisions.per.effect %>%
+        bind_cols(tibble_row(scenario.name, policy.name), .)
+    }
+  dd <- SIM %>%
+    mutate(scenario.N = as.integer(scenario.name)) %>%
+    filter(scenario.N <= 400) %>%
+    pivot_longer(
+      cols = starts_with("p."),
+      names_to = c("decision"),
+      names_pattern = "p\\.(.*)",
+      values_to = "p"
+    ) %>%
+    filter(decision %in% c("go", "stop", "discuss")) %>%
+    mutate(decision = factor(stringr::str_to_title(decision), levels = c("Go", "Discuss", "Stop"))) %>%
+    mutate(policy.name = factor(policy.name, levels = paste0(prefix, d.levels))) %>%
+    filter(stringr::str_starts(effect.name, "all\\.")) %>%
+    mutate(policy.name = gsub("^at\\.", "", policy.name)) %>%
+    mutate(policy.name = factor(policy.name, levels = unique(policy.name))) %>%
+    mutate(effect.name = factor(effect.name, levels = (c("all.TV.1", "all.LRV.1", "all.0.1"))))
+  gg <- ggplot(dd) +
+    theme_Publication() +
+    facet_grid(effect.name ~ policy.name,
+      labeller = labeller(
+        policy.name = identity,
+        effect.name = function(x) gsub("all\\.(.*)\\.1", "**\\1**", x)
+      )
+    ) +
+    geom_col(aes(x = scenario.N, y = p, fill = decision), width = max(diff(dd$scenario.N)), alpha = 0.8) +
+    geom_line(
+      data = dd %>% filter(decision == "Go"),
+      aes(x = scenario.N, y = 1 - p), color = colorspace::darken(decision.colors$Go, 0.2)
+    ) +
+    geom_line(
+      data = dd %>% filter(decision == "Stop"),
+      aes(x = scenario.N, y = p), color = colorspace::darken(decision.colors$Stop, 0.2)
+    ) +
+    scale_fill_manual(values = decision.colors) +
+    scale_y_continuous(labels = scales::percent) +
+    theme(strip.text.y = ggtext::element_markdown()) +
+    geom_hline(
+      data = tibble(
+        effect.name = factor(c("all.TV.1", "all.LRV.1"), levels = levels(dd$effect.name)),
+        p = c(0.1, 1 - 0.2),
+        threshold.name = c("10% Stop", "20% Go")
+      ),
+      aes(yintercept = p, linetype = threshold.name)
+    ) +
+    scale_linetype_manual(values = c(
+      "10% Stop" = "dashed",
+      "20% Go" = "twodash"
+    )) +
+    geom_vline(xintercept = 155, alpha = 0.3) +
+    xlab("Number of patients per arm (N)") +
+    ylab("") +
+    labs(fill = "Decision", linetype = "Threshold") +
+    theme(legend.position = "bottom", legend.box = "horizontal")
+  print(gg)
+  file.name <- paste0("report/case_study_per_domain_policies_", prefix, ".pdf")
+  ggsave(file.name)
+}
+```
+
+```{r}
+library(ggplot2)
+for (domain.name in ENDPOINTS$domains$name) {
+  SIM <- foreach(scenario.name = names(SCENARIOS), .combine = "bind_rows") %:%
+    foreach(
+      policy.name = sapply(ENDPOINTS$vars[ENDPOINTS$vars$domain == domain.name, ]$name, function(var.name) paste0("at.", var.name)),
+      .combine = "bind_rows"
+    ) %do% {
+      GET.SIM.AGG(scenario.name, policy.name)$decisions.per.effect %>%
+        bind_cols(tibble_row(scenario.name, policy.name), .)
+    }
+  dd <- SIM %>%
+    mutate(scenario.N = as.integer(scenario.name)) %>%
+    pivot_longer(
+      cols = starts_with("p."),
+      names_to = c("decision"),
+      names_pattern = "p\\.(.*)",
+      values_to = "p"
+    ) %>%
+    filter(decision %in% c("go", "stop", "discuss")) %>%
+    mutate(decision = factor(stringr::str_to_title(decision), levels = c("Go", "Discuss", "Stop"))) %>%
+    mutate(policy.name = factor(policy.name, levels = paste0("at.", ENDPOINTS$vars$name))) %>%
+    filter(stringr::str_starts(effect.name, "all\\.")) %>%
+    mutate(policy.name = gsub("^at\\.", "", policy.name)) %>%
+    mutate(policy.name = factor(policy.name, levels = unique(policy.name))) %>%
+    mutate(effect.name = gsub("all\\.(.*)\\.1", "**\\1**", effect.name)) %>%
+    mutate(effect.name = factor(effect.name, levels = c("**TV**", "**LRV**", "**0**")))
+  gg <- ggplot(dd) +
+    facet_grid(effect.name ~ policy.name) +
+    geom_col(aes(x = scenario.N, y = p, fill = decision), width = max(diff(dd$scenario.N))) +
+    scale_fill_manual(values = decision.colors) +
+    scale_y_continuous(labels = scales::percent) +
+    theme(strip.text.y = ggtext::element_markdown()) +
+    xlab("Number of patients per arm (N)") +
+    ylab("") +
+    labs(fill = "Decision") +
+    theme(legend.position = "bottom")
+  print(gg)
+}
+```
+
+# Table 4.5 Required number of patients per arm for an all domains equal policy
+(table_case_study_N_all.domains.equal_Go_multiple.tex,
+ table_case_study_N_all.domains_equal_Stop_multiple.tex)
+ 
+# Table 4.6 Required number of patients per arm for a hierarchical domains policy
+(table_case_study_N_all.domains.equal_Go_multiple.tex,
+ table_case_study_N_all.domains_equal_Stop_multiple.tex)
+
+
+Calculate, for each effect, each $N$ and each policy, the amount of $N$ required to achieve
+the different thresholds.
+
+```{r}
+SIM <- foreach(
+  scenario.name = names(SCENARIOS),
+  .combine = "bind_rows"
+) %:%
+  foreach(
+    suffix = c("", ".no.Events", ".no.Events.no.6MWD", ".no.Events.no.6MWD.adj.cond"),
+    .combine = "bind_rows"
+  ) %:%
+  foreach(
+    policy.name = c("all.domains.equal", "hierarchical.domains"),
+    .combine = "bind_rows"
+  ) %dopar% {
+    foreach(params.name = names(PARAMS), .combine = "bind_rows") %do% {
+      GET.SIM.AGG(scenario.name, paste0(policy.name, suffix), params.name)$decisions.per.effect %>%
+        bind_cols(tibble_row(scenario.name, policy.name, params.name, suffix), .)
+    }
+  }
+
+dd <- SIM %>%
+  mutate(
+    scenario.N = as.integer(scenario.name),
+    scenario.name = NULL
+  ) %>%
+  # pivot_longer(cols = starts_with("p."),
+  #              names_to = c("decision"),
+  #              names_pattern = "p\\.(.*)",
+  #              values_to="p") %>%
+  # filter(decision  %in% c("go","stop","discuss")) %>%
+  # mutate(decision =  factor(stringr::str_to_title(decision), levels=c("Go","Discuss","Stop"))) %>%
+  filter(stringr::str_starts(effect.name, "all\\.|Eve\\.et[3]\\.")) %>%
+  filter(effect.name != "all.LRV.1") %>%
+  # Add
+  rowwise() %>%
+  summarise(cur_data(),
+    threshold.name = if (correct.decision == "Go") {
+      c(">80% Go", ">90% Go")
+    } else {
+      c(">70% Stop", ">80% Stop", "<5% Go")
+    },
+    # threshold.value   = if(correct.decision == "Go") { c(.9,.8) } else { c(.7,.8) },
+    threshold.reached = if (correct.decision == "Go") {
+      c(.8 <= p.go, .9 <= p.go)
+    } else {
+      c(.7 <= p.stop, .8 <= p.stop, .05 >= p.go)
+    }
+  ) %>%
+  ungroup() %>%
+  mutate(threshold.name = forcats::fct_inorder(threshold.name)) %>%
+  group_by(across(!scenario.N &
+    !threshold.reached &
+    !starts_with(c("p.", "error.", "n.studies.")))) %>%
+  summarise(threshold.N = {
+    ii <- max(c(0, which(threshold.reached == FALSE)))
+    paste0(
+      "\\makebox[\\widthof{.000}][r]{",
+      if (ii == length(threshold.reached)) {
+        paste0(">", max(scenario.N), "")
+      } else {
+        paste0(scenario.N[ii + 1])
+      }, "}"
+    )
+  }) %>%
+  ungroup() %>%
+  rowwise() %>%
+  summarise(
+    cur_data() %>% select(!starts_with("effect.for.")),
+    threshold.name,
+    {
+      d <- cur_data() %>%
+        select(starts_with("effect.for.")) %>%
+        rename_with(function(x) {
+          gsub(pattern = "^effect\\.for\\.", replacement = "", x = x)
+        }) %>%
+        pivot_longer(everything())
+      assertthat::assert_that(all(d$name == ENDPOINTS$vars$name))
+      domains.effect <- tibble(
+        domain = ENDPOINTS$vars$domain,
+        effect = ifelse(d$value == ENDPOINTS$vars$tv, "\\makebox[\\widthof{0l}][c]{TV}",
+          ifelse(d$value == ENDPOINTS$vars$lrv, "\\makebox[\\widthof{0l}][c]{LRV}",
+            ifelse(d$value == 0, "\\makebox[\\widthof{0l}][c]{0}",
+              paste0("\\makebox[\\widthof{0l}][c]{", d$value, "}")
+            )
+          )
+        )
+      ) %>% distinct()
+      pivot_wider(domains.effect, names_from = "domain", values_from = "effect", names_prefix = "")
+    }
+  ) %>%
+  select(!effect.name)
+
+SUFFIX.LIST <- c(
+  "", ".no.Events", ".no.Events.no.6MWD", ".no.Events.no.6MWD_w.o.cond" # ,
+  #    ".no.Events.no.6MWD.adj.cond"
+)
+library(kableExtra)
+for (combo in list(
+  list(
+    correct.decision = "Stop",
+    suffix.list = SUFFIX.LIST,
+    threshold.re = "", effect.re = "",
+    align = c("l|ccccc|rrrr|", rep("", 9)),
+    mod.d = function(dd) {
+      dd %>%
+        filter(!(stringr::str_starts(region.name, "Eve\\.et3\\.") & threshold.name == ">80% Stop"))
+    },
+    mod.f = function(tbl) {
+      tbl
+      # add_header_above(tbl, c(" " = 5, ">70\\\\% Stop (80%)" = 4, "<5\\\\% Go" = 4), escape=FALSE)
+    }
+  ),
+  list(
+    correct.decision = "Go",
+    suffix.list = SUFFIX.LIST,
+    threshold.re = "", effect.re = "", align = c("l|ccccc|rrrr|", rep("", 9)),
+    mod.d = function(dd) {
+      dd %>%
+        filter(region.name == "all.TV" & threshold.name == ">90% Go" |
+          stringr::str_starts(region.name, "Eve\\.et3\\.") & threshold.name == ">80% Go")
+    },
+    mod.f = function(tbl) {
+      tbl
+      # add_header_above(tbl, c(" " = 5, ">80% Go" = 4, ">90% Go" = 4))
+    }
+  ) # ,
+  # list(suffix.list=c(".no.6MWD",".no.Events.no.6MWD"), threshold.re = "80% Go|70% Stop",
+  #      effect.re = "^Eve\\.et3",mod.d = NULL, align=NULL, mod.f = NULL)
+)) {
+  list2env(combo, environment())
+  dd.1 <- dd %>%
+    filter(correct.decision == !!correct.decision) %>%
+    mutate(params.name = ifelse(params.name == "DEFAULT", "", paste0("_", params.name))) %>%
+    mutate(suffix = paste0(suffix, params.name)) %>%
+    select(!params.name) %>%
+    filter(suffix %in% !!suffix.list) %>%
+    select(!correct.decision) %>%
+    filter(grepl(threshold.name, pattern = !!threshold.re)) %>%
+    filter(grepl(region.name, pattern = !!effect.re)) %>%
+    pivot_wider(
+      names_from = c("suffix"),
+      values_from = c("threshold.N"),
+      names_glue = "N{suffix}",
+      names_sort = TRUE
+    )
+  print(dd.1)
+
+  for (policy.name in unique(dd$policy.name)) {
+    dd.2 <- dd.1 %>%
+      filter(policy.name == !!policy.name) %>%
+      arrange(region.name, threshold.name)
+    if (!is.null(mod.d)) {
+      dd.2 <- mod.d(dd.2)
+    }
+    dd.3 <- dd.2 %>%
+      select(!policy.name) %>%
+      mutate(region.name = list(
+        all.TV = "all $≥$TV",
+        Eve.et3.TV = "Events and 3 others $≥$TV, remaining one $≥$0",
+        Eve.et3.0 = "Events and 3 others $≤$0,  remaining one $≤$LRV",
+        all.0 = "all $≤$0"
+      )[region.name] %>% unlist())
+    dd.4 <-
+      if (policy.name == "all.domains.equal") {
+        dd.3 %>% rename(
+          "$\\GAllEq$"  = "N",
+          "$\\GAllEqNoEvents$" = "N.no.Events",
+          "$\\GAllEqNoEventsNoMWD$" = "N.no.Events.no.6MWD",
+          "$\\GAllEqNoEventsNoMWDNoCond$" = "N.no.Events.no.6MWD_w.o.cond" # ,
+          # "$\\GAllEqNoEventsNoMWDAdjCond$" = "N.no.Events.no.6MWD.adj.cond"
+        )
+      } else if (policy.name == "hierarchical.domains") {
+        dd.3 %>% rename(
+          "$\\GHier$"  = "N",
+          "$\\GHierNoEvents$" = "N.no.Events",
+          "$\\GHierNoEventsNoMWD$" = "N.no.Events.no.6MWD",
+          "$\\GHierNoEventsNoMWDNoCond$" = "N.no.Events.no.6MWD_w.o.cond" # ,
+          # "$\\GHierNoEventsNoMWDAdjCond$" = "N.no.Events.no.6MWD.adj.cond"
+        )
+      } else {
+        stop(policy.name)
+      }
+    dd.4 <- dd.4 %>% select(!region.name)
+    file.name <- paste0("report/table_case_study_N_", policy.name, "_", correct.decision, "_", "multiple.tex")
+    tbl <- knitr::kable(dd.4 %>%
+      rename_with(function(x) {
+        ifelse(x %in% ENDPOINTS$domains$name | stringr::str_starts(x, "\\$\\\\G"),
+          paste0("\\rotatebox[origin=l]{90}{", x, "}"),
+          x
+        )
+      }) %>%
+      mutate(threshold.name = gsub("%", "\\\\%", threshold.name)) %>%
+      rename(" " = threshold.name),
+    format = "latex", escape = FALSE, booktabs = T, align = align
+    )
+
+    tbl <- tbl %>% pack_rows(index = table(forcats::fct_inorder(dd.3$region.name)), escape = FALSE)
+    if (!is.null(mod.f)) {
+      tbl <- mod.f(tbl)
+    }
+    tbl <- tbl %>% collapse_rows(columns = c(1), latex_hline = "major")
+    tbl <- tbl %>% kable_styling(
+      latex_options = "striped", position = "left",
+      stripe_index = seq(from = 2, to = nrow(dd.4), by = 2)
+    )
+    tbl %>% save_kable(file = file.name)
+  }
+}
+```
+
+# Table 4.4 Power of each endpoint in the case study
+(case_power_155.tex)
+
+```{r}
+N <- 155
+N.name <- as.character(N)
+power_per_var(TRIALS[[N.name]])$vars
+
+dd <- power_per_var(TRIALS[[N.name]])$vars %>%
+  transmute(
+    "Domain" = domain, "Endpoint" = name,
+    "deg.f." = df, "SE" = se, "Power" = round(power, 3)
+  )
+dd
+kable(dd, booktabs = T, digits = 3, format = "latex") %>% save_kable(paste0("report/case_power_", N.name, ".tex"))
+
+lalonde_per_var(TRIALS[[N.name]])$vars
+```
+
+# Figure 4.4(a) - Decision probabilities in the case study for the "all domains equal" policy
+(plot_case_N_all.domains.equal.pdf)
+# Figure 4.5(a) - Decision probabilities in the case study for the hierarchical policy
+(plot_case_N_hierarchical.domains.pdf)
+
+```{r, message=FALSE}
+library(ggplot2)
+for (policy.name in c("all.domains.equal", "hierarchical.domains")) {
+  for (start_pattern in c("all\\.")) {
+    SIM <-
+      foreach(
+        suffix = list("", ".no.Events.no.6MWD"),
+        .combine = "bind_rows"
+      ) %:%
+      foreach(scenario.name = names(SCENARIOS), .combine = "bind_rows") %dopar% {
+        foreach(params.name = names(PARAMS), .combine = "bind_rows") %do% {
+          GET.SIM.AGG(scenario.name, paste0(policy.name, suffix), params.name)$decisions.per.effect %>%
+            bind_cols(tibble_row(scenario.name, policy.name, params.name, suffix), .)
+        }
+      }
+    dd <- SIM %>%
+      mutate(scenario.N = as.integer(scenario.name)) %>%
+      pivot_longer(
+        cols = starts_with("p."),
+        names_to = c("decision"),
+        names_pattern = "p\\.(.*)",
+        values_to = "p"
+      ) %>%
+      filter(decision %in% c("go", "stop", "discuss")) %>%
+      mutate(decision = factor(stringr::str_to_title(decision), levels = c("Go", "Discuss", "Stop"))) %>%
+      filter(stringr::str_starts(effect.name, !!start_pattern)) %>%
+      filter(scenario.N <= 300) %>%
+      mutate(policy.id = paste0(suffix, ".", params.name)) %>%
+      mutate(policy.id = factor(
+        policy.id,
+        levels = c(".DEFAULT", ".no.Events.no.6MWD.DEFAULT", ".no.Events.no.6MWD.w.o.cond")
+      )) %>%
+      filter(!is.na(policy.id)) %>%
+      mutate(effect.name = gsub("all\\.(.*)\\.1", "\\1", effect.name)) %>%
+      mutate(effect.name = factor(effect.name, levels = c("TV", "LRV", "0")))
+    gg <- ggplot(dd) +
+      facet_grid(effect.name ~ policy.id,
+        labeller =
+          labeller(
+            effect.name = function(x) paste0("**", x, "**"),
+            policy.id = function(x) {
+              list(
+                .DEFAULT = "original",
+                .no.Events.no.6MWD.DEFAULT = "w/o.Events,6MWD",
+                .no.Events.no.6MWD.w.o.cond = "w/o.Events,6MWD (w/o.cond)"
+              )[x]
+            }
+          )
+      ) +
+      geom_col(aes(x = scenario.N, y = p, fill = decision), width = max(diff(dd$scenario.N)), alpha = 0.8) +
+      geom_line(
+        data = dd %>% filter(decision == "Go"),
+        aes(x = scenario.N, y = 1 - p), color = colorspace::darken(decision.colors$Go, 0.2)
+      ) +
+      geom_line(
+        data = dd %>% filter(decision == "Stop"),
+        aes(x = scenario.N, y = p), color = colorspace::darken(decision.colors$Stop, 0.2)
+      ) +
+      scale_fill_manual(values = decision.colors) +
+      geom_hline(
+        data = dd %>%
+          filter(effect.name != "LRV") %>%
+          group_by(effect.name, correct.decision) %>%
+          rowwise() %>%
+          summarise(
+            meaning = if (correct.decision == "Go") {
+              c("90% Go")
+            } else {
+              c("5% Go", "70% Stop", "80% Stop")
+            },
+            yintercept = if (correct.decision == "Go") {
+              c(1 - .9)
+            } else {
+              c(1 - .05, .7, .8)
+            }
+          ) %>%
+          ungroup() %>%
+          distinct(),
+        aes(yintercept = yintercept, linetype = meaning)
+      ) +
+      theme_Publication() +
+      geom_vline(xintercept = ifelse(policy.name == "all.domains.equal",
+        155,
+        155
+      ), alpha = 0.3) +
+      scale_y_continuous(labels = scales::percent) +
+      theme(strip.text.y = ggtext::element_markdown(), legend.box = "vertical") +
+      scale_linetype_thresholds(include.only = c("90% Go", "70% Stop", "80% Stop", "5% Go")) +
+      labs(y = "", x = "Number of patients per arm (N)", linetype = "", fill = "") +
+      theme(legend.position = "none")
+    print(gg)
+    file.name <- paste0("report/plot_case_N_", policy.name, ".pdf")
+    ggsave(file.name, width = 7, height = 4)
+  }
+}
+```
+
+# Figure 4.4(b) - Decision probabilities in the case study for the "all domains equal" policy (N = 155)
+(case_study_endpoint_probabilities_all.domains.equal.pdf)
+# Figure 4.5(b) - Decision probabilities in the case study for the hierarchical policy (N = 155)
+(case_study_endpoint_probabilities_hierarchical.domains.pdf)
+
+```{r}
+dd <- foreach(base.policy = c("all.domains.equal", "hierarchical.domains"), .combine = "bind_rows") %:%
+  foreach(policy.suffix = c("", ".no.Events.no.6MWD"), .combine = "bind_rows") %:%
+  foreach(policy.params = names(PARAMS), .combine = "bind_rows") %do% {
+    GET.SIM.AGG("155", paste0(base.policy, policy.suffix), policy.params)$decisions.per.effect %>%
+      pivot_decisions_longer() %>%
+      mutate(correct.decision = dplyr::if_else(effect.name == "all.LRV.1", "H", as.character(correct.decision))) %>%
+      bind_cols(tibble_row(base.policy, policy.suffix = paste0("p", policy.suffix, "_", policy.params)))
+  }
+POLICY.LABELS <- list(
+  "p_DEFAULT" = "original",
+  p.no.Events.no.6MWD_DEFAULT = "w/o.Events,6MWD",
+  p.no.Events.no.6MWD_w.o.cond = "w/o.Events,6MWD (w/o.cond)"
+)
+for (base.policy in dd$base.policy %>% unique()) {
+  gg <- ggplot(dd %>% filter(base.policy == !!base.policy) %>%
+    filter(policy.suffix %in% names(POLICY.LABELS)), aes(x = forcats::fct_rev(effect.name), y = p, fill = decision)) +
+    geom_col() +
+    facet_grid(correct.decision ~ policy.suffix,
+      scale = "free_y", space = "free_y",
+      labeller = labeller(
+        correct.decision = function(x) x,
+        policy.suffix =
+          function(x) POLICY.LABELS[x]
+      )
+    ) +
+    scale_fill_Decision() +
+    scale_y_continuous(labels = scales::percent) +
+    geom_hline(
+      data = THRESHOLDS,
+      aes(yintercept = p, linetype = threshold.name)
+    ) +
+    scale_linetype_thresholds() +
+    theme_Publication() +
+    labs(linetype = "Threshold", fill = "Decision", y = "", x = "") +
+    geom_text(
+      position = position_stack(vjust = 0.5, reverse = FALSE),
+      aes(label = ifelse(p < 0.15, "", paste0(round(p * 100), "%")))
+    ) +
+    coord_flip() +
+    scale_x_discrete(
+      labels = list(
+        all.TV.1 = "**TV**",
+        Eve.et3.TV.1 = "with *Imaging* = 0",
+        Eve.et3.TV.2 = "with *Well-being* = 0",
+        Eve.et3.TV.3 = "with *Exercise* = 0",
+        Eve.et3.TV.4 = "with *Biomarker* = 0",
+        all.LRV.1 = "**LRV**",
+        all.0.1 = "**0**",
+        Eve.et3.0.1 = "with *Imaging* = LRV",
+        Eve.et3.0.2 = "with *Well-being* = LRV",
+        Eve.et3.0.3 = "with *Exercise* = LRV",
+        Eve.et3.0.4 = "with *Biomarker* = LRV"
+      ),
+      position = "top"
+    ) +
+    theme(
+      legend.position = "bottom", legend.box = "vertical",
+      strip.background.y = element_blank(),
+      strip.text.y = element_blank(),
+      axis.text.y.right = ggtext::element_markdown()
+    )
+  print(gg)
+  file.name <- paste0("report/case_study_endpoint_probabilities_", base.policy, ".pdf")
+  ggsave(file.name, plot = gg, width = 7, height = 5)
+}
+```
+
+# Figure 4.1 - Per endpoint thresholds in the domain-level policies 
+(Graphical representation of the thresholds on the observed effects …)
+(case_study_endpoint_thresholds.pdf)
+
+```{r, fig.height=8,fig.width=7}
+library(ggpubr)
+dd <- lalonde_per_domain(TRIALS$`155`, PARAMS$DEFAULT)
+dd <- dd %>% mutate(name = forcats::fct_inorder(name))
+make_segments <- function(data) {
+  data %>%
+    group_by(domain, name) %>%
+    summarise({
+      d <- cur_data()
+      d1 <- d %>% filter(decision == "Stop")
+      e1 <- d1 %>%
+        transmute(
+          start = -Inf,
+          end = threshold,
+          decision = DECISION$Stop,
+          strength = domain.n.vars - required
+        )
+      stop.threshold <- min(d1$threshold)
+
+
+      d2 <- d %>%
+        filter(decision == "Go") %>%
+        arrange(threshold)
+      e2 <- d2 %>%
+        filter(required == 1 &
+          threshold > stop.threshold) %>%
+        transmute(
+          start = stop.threshold,
+          end = threshold,
+          decision = DECISION$Discuss,
+          strength = 0
+        )
+
+      e4 <- d2 %>%
+        filter(required == 1) %>%
+        transmute(
+          start = max(stop.threshold, threshold),
+          end = +Inf,
+          decision = DECISION$Go,
+          strength = 0
+        )
+
+      # Thresholds Go->Discuss
+      d3 <- d2 %>% filter(required < domain.n.vars)
+      e3 <- d2 %>%
+        transmute(
+          start = threshold,
+          end = c(d3$threshold, +Inf),
+          decision = DECISION$Go,
+          strength = required
+        )
+
+      # Thresholds Stop->Go
+      bind_rows(e1, e2, e4, e3)
+    })
+}
+
+make_segments_simple <- function(data) {
+  data %>%
+    group_by(domain, name) %>%
+    summarise({
+      d <- cur_data()
+      d1 <- d %>% filter(decision == "Stop")
+      e1 <- d1 %>%
+        transmute(
+          start = -Inf,
+          end = threshold,
+          decision = DECISION$Stop,
+          strength = domain.n.vars - required
+        )
+      stop.threshold <- min(d1$threshold)
+
+
+      d2 <- d %>%
+        filter(decision == "Go") %>%
+        arrange(threshold)
+      e2 <- d2 %>%
+        filter(required == domain.n.vars &
+          threshold > stop.threshold) %>%
+        transmute(
+          start = stop.threshold,
+          end = threshold,
+          decision = DECISION$Discuss,
+          strength = 0
+        )
+
+      e4 <- d2 %>%
+        filter(required == domain.n.vars) %>%
+        transmute(
+          start = max(stop.threshold, threshold),
+          end = +Inf,
+          decision = DECISION$Go,
+          strength = 0
+        )
+
+
+      # Thresholds Stop->Go
+      bind_rows(e1, e2, e4)
+    })
+}
+
+parse_endpoint <- function(name) {
+  full.name <- name
+  # Parse neg
+  m <- stringr::str_match(pattern = "^-(.*)$", name)
+  is.neg <- !is.na(m[, 2])
+  name <- ifelse(is.na(m[, 2]), name, m[, 2])
+  # Parse "log"
+  m <- stringr::str_match(pattern = "^log[(](.*)[)]$", name)
+  is.log <- !is.na(m[, 2])
+  name <- ifelse(is.na(m[, 2]), name, m[, 2])
+  # Parse HR
+  m <- stringr::str_match(pattern = "^(.*)[.]HR$", name)
+  is.HR <- !is.na(m[, 2])
+  name <- ifelse(is.na(m[, 2]), name, m[, 2])
+  base.name <- name
+  tibble::tibble(full.name, base.name, is.neg, is.log, is.HR)
+}
+
+dd.s <- make_segments(dd)
+dd.s
+dd.sl <- make_segments_simple(dd)
+dd.sl
+dd.p <- dd %>%
+  select(domain, name, lrv, tv) %>%
+  mutate(no.effect = 0) %>%
+  distinct() %>%
+  pivot_longer(c("no.effect", "lrv", "tv"), names_to = "ref") %>%
+  mutate(ref = forcats::fct_inorder(stringr::str_to_upper(ref)))
+dd.p
+dd.g <- dd
+ii <- dd$decision == "NoNeg"
+dd.g[ii, ] <- dd.g[ii, ] %>%
+  mutate(
+    decision = "-NoNeg",
+    threshold = -threshold
+  )
+
+ggl <- list()
+for (endpoint.name in unique(dd.g$name)) {
+  dd.ge <- dd.g %>% filter(name == !!endpoint.name)
+  dd.se <- dd.s %>% filter(name == !!endpoint.name)
+  dd.sle <- dd.sl %>% filter(name == !!endpoint.name)
+  dd.pe <- dd.p %>% filter(name == !!endpoint.name)
+
+  the.tv <- ENDPOINTS$vars[ENDPOINTS$vars$name == endpoint.name, "tv", drop = TRUE]
+  the.units <- SOURCE %>%
+    filter(variable == !!endpoint.name) %>%
+    .$units
+  parsed <- parse_endpoint(endpoint.name)
+
+  if (parsed$is.log & parsed$is.neg) {
+    invlog <- if (parsed$is.HR) {
+      function(x) {
+        dplyr::if_else(x == +Inf, +Inf, -exp(-x))
+      }
+    } else {
+      function(x) {
+        dplyr::if_else(x == +Inf, +Inf, -(exp(-x) - 1))
+      }
+    }
+    the.tv <- invlog(the.tv)
+    dd.ge <- dd.ge %>% mutate(
+      ref.value = invlog(ref.value),
+      threshold = invlog(threshold)
+    )
+    dd.se <- dd.se %>% mutate(
+      start = invlog(start),
+      end = invlog(end)
+    )
+    dd.sle <- dd.sle %>% mutate(
+      start = invlog(start),
+      end = invlog(end)
+    )
+    dd.pe <- dd.pe %>% mutate(value = invlog(value))
+  }
+  gg <- ggplot(dd.ge
+  %>% filter(decision != "-NoNeg")) +
+    # facet_wrap(name ~ ., scales = "free", ncol=1) +
+    geom_rect(
+      data = dd.sle,
+      aes(fill = decision, xmin = start, xmax = end, ymin = -Inf, ymax = +Inf), alpha = 0.3
+    ) +
+    geom_segment(
+      data = dd.se,
+      aes(y = name, yend = name, x = start, xend = end, col = decision, alpha = strength), size = 3
+    ) +
+    geom_vline(
+      data = dd.ge %>% filter(decision == "Stop"),
+      aes(xintercept = threshold, linetype = as.factor(domain.n.vars - required)),
+      col = colorspace::darken(decision.colors$Stop, 0.3)
+    ) +
+    geom_vline(
+      data = dd.ge %>% filter(decision == "Go"),
+      aes(xintercept = threshold, linetype = as.factor(domain.n.vars - required)),
+      col = colorspace::darken(decision.colors$Go, 0.3)
+    ) +
+    scale_alpha(range = c(0.9, 0.3), guide = "none") +
+    scale_color_manual(
+      values = c(unlist(decision.colors)),
+      drop = TRUE
+    ) +
+    scale_fill_Decision() +
+    scale_shape_manual(
+      values = c("TV" = 17, "LRV" = 11, "NO.EFFECT" = 0),
+      labels = c("TV" = "TV", "LRV" = "LRV", "NO.EFFECT" = "0 (No effect)")
+    ) +
+    geom_point(data = dd.pe, aes(shape = ref, y = name, x = value)) +
+    labs(
+      linetype = "Required \nendpoints",
+      color = "Decision  ",
+      fill = "Decision  ",
+      shape = "Reference \nvalue",
+      x = "",
+      y = ""
+    ) +
+    scale_linetype_manual(
+      labels = list(
+        "0" = "all",
+        "1" = "all minus 1",
+        "2" = "all minus 2",
+        "3" = "all minus 3"
+      ),
+      values = c(
+        "0" = "solid",
+        "1" = "longdash",
+        "2" = "dashed",
+        "3" = "dotdash"
+      )
+    ) +
+    scale_y_discrete(labels = function(x) {
+      sapply(x, function(name) {
+        domain <- ENDPOINTS$vars %>%
+          filter(name == !!name) %>%
+          .$domain
+        parsed <- parse_endpoint(name)
+        base.name <- parsed$base.name
+        if (parsed$is.HR) {
+          base.name <- paste0(base.name, " (HR)")
+        }
+        paste0("<span style='color: #777777'><em>", domain, "</em></span>", "<br>", base.name)
+      })
+    }) +
+    theme_Publication() +
+    theme(
+      strip.background.x = element_blank(),
+      strip.text.x = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = ggtext::element_markdown()
+    ) +
+    theme(plot.margin = margin()) +
+    theme(legend.position = "bottom", legend.box = "horizontal") +
+    guides(
+      linetype = guide_legend(nrow = 4, byrow = TRUE),
+      shape = guide_legend(nrow = 3, byrow = TRUE),
+      fill = guide_legend(nrow = 3, byrow = TRUE),
+      color = guide_legend(nrow = 3, byrow = TRUE)
+    )
+  the.limits <- c(NA, NA)
+  if (endpoint.name != "-log(MACE.HR)") {
+    the.limits <- c(-0.05 * the.tv, 1.16 * the.tv)
+  }
+  # Define labels
+  the.labels <- identity
+  if (parsed$is.neg) {
+    the.labels <- function(x) -x
+  }
+  the.labels <- (function(the.labels, the.units, parsed) {
+    the.labels
+    the.units
+    parsed
+    function(x) {
+      x <- the.labels(x)
+      last.ii <- min(which(!is.na(x) & !(x == 0)))
+      if (the.units == "%") {
+        x <- 100 * x
+        x <- paste0(x, "%")
+      } else if (parsed$is.HR) {
+        x <- as.character(x)
+      } else {
+        x[last.ii] <- paste0(x[last.ii], " ", the.units)
+      }
+      x.plus <- dplyr::if_else(!stringr::str_starts(x, "-") &
+        !stringr::str_starts(x, "0($|[^0-9.])") &
+        !parsed$is.HR,
+      paste0("+", x),
+      x
+      )
+      x[last.ii] <- x.plus[last.ii]
+      x
+    }
+  })(the.labels, the.units, parsed)
+  # Define breaks
+  the.breaks <- waiver()
+  if (parsed$is.HR) {
+    the.breaks <- -c(1.5, 1.4, 1.3, 1.2, 1.1, 1, 0.9, 0.8, 0.7, 0.6)
+  }
+  gg <- gg + scale_x_continuous(
+    labels = the.labels,
+    limits = the.limits,
+    breaks = the.breaks
+  )
+
+  ggl <- append(ggl, list(gg))
+  print(gg)
+}
+gg <- ggarrange(plotlist = ggl, ncol = 1, common.legend = TRUE, legend = "bottom", align = "hv") +
+  theme(plot.margin = margin(t = 3, r = 26))
+print(gg)
+ggsave(plot = gg, "report/case_study_endpoint_thresholds.pdf", width = 7, height = 7, device = cairo_pdf)
+```
+
+# Figure 4.2 - Two dimensional detail of a domain-level subpolicy
+Domain level decision for the "Imaging" domain depending on ...
+(case_study_2d_uni_adj_N=155.pdf,
+ case_study_2d_uni_unadj_N=180.pdf,
+ case_study_2d_uni_simes_N=155.pdf,
+ case_study_2d_uni_simes_N=180.pdf)
+
+```{r}
+
+uni_unadj <- p_policy(
+  stop.if = p_all(at_each_endpoint(p_lalonde %>% is_Stop())),
+  go.if = at_least_1_corrected(
+    at_each_endpoint(p_lalonde %>% is_Go()),
+    level = "p.FG",
+    correction = "none"
+  )
+)
+
+# uni_bonf <- p_policy(
+#   stop.if = p_all(at_each_endpoint(p_lalonde %>% is_Stop)),
+#   go.if   = at_least_1_corrected(
+#     at_each_endpoint(p_lalonde %>% is_Go),
+#     level = "p.FG",
+#     correction="bonferroni"))
+
+POLICIES.2D <- tibble::lst(uni_unadj, uni_simes)
+
+for (N in c("155", "180")) {
+  for (policy.2d in names(POLICIES.2D)) {
+    base.trial <- TRIALS[[N]] %at_domain% "Imaging"
+    l.dd <- lalonde_per_domain(base.trial, PARAMS$DEFAULT)
+    schema <- POLICIES.2D[[policy.2d]]
+    resolution <- 128
+    params <- list(p.FS = 0.1, p.FG = 0.2)
+    tv.LVMI <- parse_effect(base.trial %at_vars% "-LVMI", "tv")
+    lrv.LVMI <- parse_effect(base.trial %at_vars% "-LVMI", "lrv")
+    tv.LAVI <- parse_effect(base.trial %at_vars% "-LAVI", "tv")
+    lrv.LAVI <- parse_effect(base.trial %at_vars% "-LAVI", "lrv")
+
+    x <- seq(-0.05 * tv.LVMI, 1.1 * tv.LVMI, length.out = resolution)
+    y <- seq(-0.05 * tv.LAVI, 1.1 * tv.LAVI, length.out = resolution)
+    df <-
+      run_experiment_inline("sim_20220404_0852_case_study_2d", function() {
+        run_montecarlo(
+          trial.params = tidyr::expand_grid(x = x, y = y),
+          fun.trial = function(.params) {
+            base.trial %>% with_ground_truth(c(0, .params$y, .params$x, 0))
+          },
+          random = FALSE,
+          N = 1,
+          aggregate.decisions = FALSE,
+          cores = 64,
+          policy = function(study, only.decision = TRUE) {
+            outcome_fun(
+              schema, base.trial$endpoints, params,
+              criteria_fun(schema, base.trial$endpoints, study$summary)
+            )$decision
+          }
+        )
+      },
+      depends.on = tibble::lst(policy.2d, resolution, N),
+      depend.on.function = FALSE
+      )
+    ll <- lalonde_per_var(base.trial)
+
+    gg <- list(
+      df = df,
+      step.x = median(diff(x)),
+      step.y = median(diff(y)),
+      var.x = base.trial$endpoints %at_vars% "-LVMI" %>% .$vars,
+      var.y = base.trial$endpoints %at_vars% "-LAVI" %>% .$vars,
+      ll.x = base.trial %at_vars% "-LVMI" %>% lalonde_per_var() %>% .$vars,
+      ll.y = base.trial %at_vars% "-LAVI" %>% lalonde_per_var() %>% .$vars
+    ) %>% plot_lalonde_grid(., thresholds = FALSE, fill.alpha = 1)
+    gg <- gg +
+      theme_Publication() +
+      geom_vline(
+        data = l.dd %>%
+          filter(
+            name == "-LVMI",
+            decision %in% c("Go", "Stop")
+          ),
+        aes(
+          xintercept = threshold,
+          col = decision,
+          linetype = as.factor(domain.n.vars - required)
+        )
+      ) +
+      geom_hline(
+        data = l.dd %>%
+          filter(
+            name == "-LAVI",
+            decision %in% c("Go", "Stop")
+          ),
+        aes(
+          yintercept = threshold,
+          col = decision,
+          linetype = as.factor(domain.n.vars - required)
+        )
+      ) +
+      scale_linetype_manual(
+        labels = list(
+          "0" = "all",
+          "1" = "all minus 1",
+          "2" = "all minus 2",
+          "3" = "all minus 3"
+        ),
+        values = c(
+          "0" = "solid",
+          "1" = "longdash",
+          "2" = "dashed",
+          "3" = "dotdash"
+        )
+      ) +
+      scale_color_manual(
+        values = c(
+          "Go" = colorspace::darken(decision.colors$Go, 0.3),
+          "Stop" = colorspace::darken(decision.colors$Stop, 0.3)
+        ),
+        guide = NULL
+      ) +
+      xlab("LVMI (g/m²)") +
+      scale_x_continuous(labels = function(x) -x) +
+      ylab("LAVI (mℓ/m²)") +
+      geom_point(data = tibble::tibble_row(), aes(x = 0, y = 0, shape = "NO.EFFECT")) +
+      scale_y_continuous(labels = function(x) -x) +
+      scale_shape_manual(
+        values = c("TV" = 17, "LRV" = 11, "NO.EFFECT" = 0),
+        labels = c("TV" = "TV", "LRV" = "LRV", "NO.EFFECT" = "0 (No effect)")
+      ) +
+      labs(col = "Decision    ", linetype = "Required    \nendpoints", shape = "Response   ")
+
+    print(gg)
+    gg <- gg + theme(legend.position = "bottom", legend.box = "horizontal") +
+      guides(
+        linetype = guide_legend(nrow = 4, byrow = TRUE),
+        shape = guide_legend(nrow = 3, byrow = TRUE),
+        fill = guide_legend(nrow = 3, byrow = TRUE)
+      )
+    gg.legend <- cowplot::get_legend(gg)
+    gg <- gg + theme(legend.position = "none")
+    ggsave(plot = gg, paste0("report/case_study_2d_", policy.2d, "_N=", N, ".pdf"), device = cairo_pdf, width = 4, height = 3.5)
+  }
+
+  # knitr::plot_crop(filename)
+}
+# print(pic.legend)
+ggsave(plot = gg.legend, paste0("report/case_study_2d_legend.pdf"), device = cairo_pdf, width = 7, height = 1.5)
+```

@@ -1,0 +1,286 @@
+---
+title: "Case study"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Case study}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+This is a more computationally intensive example.
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup, message = FALSE}
+library(gonogo)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(printr)
+library(foreach)
+library(doParallel)
+
+options(digits = 2)
+```
+
+In this vignette we use the `gonogo` library to design an early-stage clinical
+trial for the hypothetical cardiovascular drug `XGNG-0000`.
+
+The endpoint which will be used in the Phase III trial is 
+the number of major adverse cardiac events (MACE) events.
+The hazard ratio is defined as follows:
+
+\[HR = \frac{\# \text{MACE in treatment group}}{\# \text{MACE in control group}}\]
+
+Obtaining enough power with only this endpoint may require a too high
+number of patients for a Phase II trial. Therefore, a range of 
+addtional endpoints are used in addition to this one.
+
+Our framework only supports normally distributed endpoints such that
+TV > LRV > 0. However, it is possible to also handle log-normal distributed
+endpoints, and endpoints such that TV < LRV < 0 by performing the analysis
+on the transformed endpoints.
+
+
+Our framework only considers measurements that are taken at the patient level,
+and then aggregated; therefore the SD for an individual measurement is required.
+This entails difficulties for endpoints that are global, such as the overall number
+of events in an arm.
+In this case, the “synthetic” SD $\sqrt{N/2}·SE$ is used in place of the SD,
+where SE is the approximate $SE$ for the estimator $\hat{μ}$.
+
+Assuming a Poisson distribution
+and using the delta method, the logarithm of the Hazard ratio
+can be approximated as a normally-distributed variable with variance
+$\frac{2}{0.05·N}$, where $N$ is the number of patients per arm, and $0.05$ is
+the expected rate at which the events occur. This means that  
+$\sqrt{N/2}·SE = \sqrt{1/0.05}$.
+
+<!-- See: https://math.stackexchange.com/a/4121680 -->
+
+After the transformations, the endpoints sourced from 
+the clinicians are as follows:
+
+```{r}
+SOURCE <- tibble::tribble(
+  ~domain, ~variable, ~TV, ~LRV, ~"SD (or √{N/2}·SE)",
+  "Biomarker", "-log(NT.proBNP)", -log(1 - 0.15), -log(1 - 0.05), 0.8,
+  "Exercise", "6MWD", 20, 12, 70,
+  "Exercise", "VO2max", 1, 0.7, 2,
+  "Well-being", "KCCQ.TSS", 5, 2, 20,
+  "Imaging", "-GLS", 0.75, 0.25, 2.5,
+  "Imaging", "-LAVI", 2, 0.5, 7,
+  "Imaging", "-LVMI", 8, 4, 12,
+  "Imaging", "LVEF", 4, 2, 10,
+  "Events", "MACE.HR", -log(0.8), -log(0.9), sqrt(1 / 0.05)
+)
+SOURCE %>% knitr::kable(digits = 2)
+```
+
+```{r}
+assertthat::assert_that(all(SOURCE$TV > SOURCE$LRV))
+assertthat::assert_that(all(SOURCE$LRV > 0))
+```
+
+```{r}
+ENDPOINTS <- make_endpoints(
+  n.domains     = length(unique(SOURCE$domain)),
+  domain.n.vars = table(SOURCE$domain)[unique(SOURCE$domain)],
+  vars.sd       = SOURCE$`SD (or √{N/2}·SE)`,
+  vars.lrv      = SOURCE$LRV,
+  vars.tv       = SOURCE$TV,
+  domain.names  = unique(SOURCE$domain),
+  vars.names    = SOURCE$variable,
+  corr.intra    = 0.4,
+  corr.inter    = 0.2
+)
+ENDPOINTS$vars
+ENDPOINTS$sigma
+sqrt(diag(ENDPOINTS$sigma))
+cov2cor(ENDPOINTS$sigma)
+```
+
+# Variable power
+
+The statistical power of each variable for an effect of TV can be computed as
+follows:
+
+```{r}
+TRIAL <- ENDPOINTS %>% with_n_patients(per.group = 150)
+power_per_var(TRIAL, use.effect = "tv")$vars %>% select(name, se, power)
+```
+
+# Comparing policies
+
+Compare an all-domains-equal policy and a hierarchical policy, both with
+and without the 6MWD endpoint.
+
+```{r}
+uni_simes <- p_policy(
+  stop.if = p_all(at_each_endpoint(p_univariate %>% has_stop())),
+  go.if = at_least_1_adjusted(
+    at_each_endpoint(p_lalonde %>% has_go()),
+    correction = "simes"
+  )
+)
+
+POLICIES <- tibble::lst(
+  all.domains.equal = p_policy(
+    go.if = at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Go())) %and%
+      none_of(at_each_endpoint(is_negatively_significant)),
+    stop.if = at_most_k_of(k = 0, at_each_domain(uni_simes %>% is_Go()))
+  ),
+  hierarchical.domains = p_policy(
+    go.if = ((uni_simes %>% is_Go() %at_domains% "Exercise")) %or%
+      (at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Go())) %at_domains% (!"Exercise")) %and%
+      none_of(at_each_endpoint(is_negatively_significant)),
+    stop.if = (uni_simes %>% is_Stop() %at_domains% ("Exercise")) %and%
+      (at_least_k_of(k = 2, at_each_domain(uni_simes %>% is_Stop())) %at_domains% (!"Exercise"))
+  ),
+  all.domains.equal.no.6MWD = all.domains.equal %at_vars% (!"6MWD"),
+  hierarchical.domains.no.6MWD = hierarchical.domains %at_vars% (!"6MWD")
+)
+
+
+DEFAULT.PARAMS <- list(p.FS = 0.1, p.FG = 0.2, alpha = 0.05)
+```
+
+Given specifications of the true effect regions of interest (for 
+each desired decision), it is possible to generate a list of true effects
+that limit the region.
+
+
+```{r}
+TRIALS <- lapply(
+  {
+    x <- c(40, 120, 360)
+    names(x) <- x
+    x
+  },
+  function(per.group) {
+    ENDPOINTS %>% with_n_patients(per.group = per.group)
+  }
+)
+
+go.regions <- list(
+  all.TV = effect_is_gt("tv"),
+  # The effect is at least the TV for at least four domains
+  # (the other has positive effect)
+  Exc.and.3.TV =
+    (effect_is_gt("tv") %at_domains% "Exercise") %and%
+      (at_least_k(k = 3, r_at_each_domain(effect_is_gt("tv"))) %at_domains% (!"Exercise")) %and%
+      effect_is_gt(0)
+)
+
+stop.regions <- list(
+  all.LRV = effect_is_lt("lrv"),
+  all.0 = effect_is_lt(0),
+  # The exercise domain and at least three other domains have no effect;
+  # the remaining domain has effect lower than LRV.
+  Exc.and.3.0 =
+    effect_is_lt("lrv") %and% (effect_is_lt(0) %at_domains% "Exercise") %and%
+      (at_least_k(
+        k = 3,
+        r_at_each_domain(effect_is_lt(0))
+      ) %at_domains% (!"Exercise"))
+)
+
+SCENARIOS <- lapply(TRIALS, function(trial) make_scenario(trial, go.regions = go.regions, stop.regions = stop.regions) %>% expand_regions())
+
+SCENARIOS$`120`$region.points
+```
+For each scenario and policy, 1000 simulations are performed to assess the probability of each decision. These simulations can be parallelized for better performance.
+
+```{r, message=FALSE}
+registerDoParallel(cores = 2)
+
+GET.SIM <- function(scenario.name, policy.name) {
+  scenario <- SCENARIOS[[scenario.name]]
+  policy <- POLICIES[[policy.name]]
+  sim.id <- paste0("sim_20220228_1857_case_study_", scenario.name, "_", policy.name)
+  run_experiment_inline(
+    sim.id,
+    depend.on.function = FALSE,
+    function() {
+      system(paste0("echo '", sim.id, "'"))
+      scenario %>%
+        simulate_with_policy(policy, N = 1000, simulate.fast = TRUE) %>%
+        with_params(DEFAULT.PARAMS) %>%
+        aggregate_scenario()
+    }
+  )
+}
+
+GET.SIM.AGG <- function(scenario.name, policy.name) {
+  scenario <- SCENARIOS[[scenario.name]]
+  policy <- POLICIES[[policy.name]]
+  sim.id <- paste0("sim_20220228_1857_case_study_agg_", scenario.name, "_", policy.name)
+  run_experiment_inline(
+    sim.id,
+    depend.on.function = FALSE,
+    function() {
+      system(paste0("echo '", sim.id, "'"))
+      sim <- GET.SIM(scenario.name, policy.name)
+      with(sim, tibble::lst(decisions.per.effect))
+    }
+  )
+}
+
+# Precompute
+foreach(scenario.name = names(SCENARIOS), .combine = "c") %:%
+  foreach(policy.name = names(POLICIES), .combine = "c") %dopar% {
+    res <- GET.SIM.AGG(scenario.name, policy.name)
+    assertthat::assert_that(is(res, "list"), msg = paste0("Error at  ", scenario.name, ",", policy.name))
+    NULL
+  }
+```
+
+Now: 
+
+```{r, message=FALSE, fig.width=8.5, fig.height=5.5}
+make_plot <- function(start_pattern) {
+  SIM <- foreach(scenario.name = names(SCENARIOS), .combine = "bind_rows") %:%
+    foreach(policy.name = names(POLICIES), .combine = "bind_rows") %do% {
+      GET.SIM.AGG(scenario.name, policy.name)$decisions.per.effect %>%
+        bind_cols(tibble_row(scenario.name, policy.name), .)
+    }
+  dd <- SIM %>%
+    mutate(scenario.N = as.integer(scenario.name)) %>%
+    pivot_longer(
+      cols = starts_with("p."),
+      names_to = c("decision"),
+      names_pattern = "p\\.(.*)",
+      values_to = "p"
+    ) %>%
+    filter(decision %in% c("go", "stop", "discuss")) %>%
+    mutate(decision = factor(stringr::str_to_title(decision), levels = c("Go", "Discuss", "Stop"))) %>%
+    filter(stringr::str_starts(effect.name, stringr::fixed(start_pattern)))
+  gg <- dd %>%
+    mutate(scenario.N = factor(scenario.N)) %>%
+    ggplot(aes(x = scenario.N, y = p, fill = decision)) +
+    facet_grid(effect.name ~ policy.name) +
+    geom_col() +
+    scale_fill_manual(values = decision.colors) +
+    theme(legend.position = "bottom") +
+    ggtitle(paste0(start_pattern, "*")) +
+    geom_text(
+      data = function(x) filter(x, p > 0.05),
+      aes(label = paste0(round(p * 100), "%")),
+      position = position_stack(vjust = 0.5)
+    ) +
+    labs(
+      x = "Number of patients per arm",
+      y = "Probability"
+    )
+  print(gg)
+}
+make_plot("all.")
+make_plot("Exc.and.3.TV.")
+make_plot("Exc.and.3.0.")
+```

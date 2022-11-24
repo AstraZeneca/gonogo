@@ -1,0 +1,1476 @@
+---
+title: "Figures concerning rates"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r, results= "hide", message=F, warning=F}
+source("theme_pub.R")
+library(gonogo)
+library(tikzDevice)
+# devtools::load_all()
+source("config.R")
+options(tikzLatexPackages = c(
+  "\\usepackage{tikz}\n",
+  "\\usepackage[active,tightpage,psfixbb]{preview}\n",
+  "\\PreviewEnvironment{pgfpicture}\n",
+  "\\setlength\\PreviewBorder{0pt}\n",
+  "\\usepackage{ulem}\n",
+  "\\newcommand{\\downcone}{m}\n",
+  "\\newcommand{\\upcone}{m}\n",
+  "\\newcommand{\\vLRV}{LRV}\n",
+  "\\newcommand{\\vTV}{TV}\n",
+  "\\newcommand{\\vct}{}\n",
+  "\\newcommand{\\RCGoNotFirstTV}{RCGoNRCGoNRCGoN}\n",
+  "\\newcommand{\\vNoEffect}{0}\n",
+  paste0(
+    "\\newcommand{\\G",
+    c("Ind", "IndAdj", "Hot", "Lik", "LikAdj", "Meas", "IndBon"),
+    "}{mmmmm}"
+  )
+))
+options(tikzDocumentDeclaration = "\\documentclass[10pt,onecolumn,english]{book}")
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tibble)
+library(tidyr)
+options(dplyr.summarise.inform = FALSE)
+library(latex2exp)
+library(kableExtra)
+```
+```{r}
+system(paste("echo '", gonogo_version(), "'"))
+```
+```{r}
+TRIAL <- list()
+for (n.per.group in c(17)) {
+  for (n.domains in c(2, 3, 4, 5)) {
+    # Maximum 10 variables, 4 variables per domain
+    for (n.vars in seq(n.domains, min(4 * n.domains, 10))) {
+      # We skip these ones to save some computation
+      # if(n.vars == 7 || n.vars == 9) next;
+      for (domain.n.vars in generate_variable_groupings(
+        n.domains,
+        n.vars,
+        min.vars.per.domain = 1,
+        max.vars.per.domain = 4,
+        ordered.except.for.first = 1
+      )) {
+        for (corr.intra in (c(0, 0.4))) {
+          for (corr.inter in (c(0, 0.2, 0.4))) {
+            if (corr.inter > corr.intra) next
+            TRIAL[[paste0(
+              "D=", n.domains,
+              ".V=", n.vars,
+              ".Vd=", paste(domain.n.vars, collapse = "_"),
+              ".ρ=(", corr.intra, ")",
+              ".τ=(", corr.inter, ")",
+              ".N=", n.per.group,
+              ""
+            )]] <-
+              make_endpoints(
+                n.domains = n.domains,
+                domain.n.vars = domain.n.vars,
+                corr.intra = corr.intra,
+                corr.inter = corr.inter
+              ) %>% with_n_patients(per.group = n.per.group)
+          }
+        }
+      }
+    }
+  }
+}
+names(TRIAL)
+
+parse_dot_name <- function(name) {
+  res <- stringr::str_match_all(name, "(([^.=]+)=([^().=]+|\\(([^)]+)\\)))*")[[1]]
+  ii <- !is.na(res[, 3])
+  res <- structure(
+    coalesce(res[ii, 5], res[ii, 4]),
+    names = res[ii, 3]
+  ) %>% as.list()
+  lapply(res, function(v) {
+    # if(stringr::str_detect(v, "^([0-9.]+_)*[0-9.]+$")) {
+    if (stringr::str_detect(v, "^[0-9.]+$")) {
+      n <- as.numeric(stringr::str_split(v, "_", simplify = TRUE))
+      # if(length(n) > 1) list(n) else n
+      n
+    } else {
+      v
+    }
+  }) %>% as_tibble_row()
+}
+parse_dot_name("D=4.V=10.Vd=4_1_2_3.ρ=(0.4).τ=(0).N=17")
+```
+
+```{r}
+trial <- TRIAL$`D=3.V=3.Vd=1_1_1.ρ=(0.4).τ=(0).N=17` %>% with_true_effect("0")
+pol <- is_negatively_significant %at_var% "d1.v1"
+xs <- run_study_summaries(trial, M = 100000, fast = TRUE)
+df <- criteria_fun(pol, trial$endpoints, xs)
+hist(df$neg.p)
+```
+
+
+```{r}
+# This keeps policies readable
+uni_adj <- make_schema_alias("uni_adj")
+dealias.uni_adj <- function(x, ...) {
+  p_policy(
+    stop.if = for_all_endpoints(p_univariate %>% has_stop()),
+    go.if =
+      at_least_1_adjusted(
+        at_each_endpoint(p_univariate %>% has_go()),
+        correction = "simes"
+      )
+  )
+}
+POLICY <- list(
+  all_domains_equal =
+    p_policy(
+      stop.if = at_most_k(k = "z", at_each_domain(uni_adj %>% is_Go())),
+      go.if =
+        at_least_k(k = "x", at_each_domain(uni_adj %>% is_Go())) %and%
+          none_of(at_each_endpoint(is_negatively_significant))
+    ),
+
+  # all_domains_equal.bis =
+  #   p_policy(
+  #     stop.if =
+  #       at_least_k(k="1+x", at_each_domain(uni_adj %>% is_Stop)),
+  #     go.if =
+  #       at_least_k(k="x", at_each_domain(uni_adj %>% is_Go)) %and%
+  #            none_of(at_each_endpoint(is_negatively_significant))
+  #   ),
+
+  hierarchical_domains =
+    p_policy(
+      stop.if =
+        ((uni_adj %>% is_Stop()) %at_domain% "d1") %and%
+          # 2 of the other domains are stop (3 including the first one)
+          at_least_k(k = 1 + 2, at_each_domain(uni_adj %>% is_Stop())),
+      go.if =
+        (((uni_adj %>% is_Go()) %at_domain% "d1") %or%
+          # x of the other domains ~ x of all domains (otherwise the first condition holds)
+          at_least_k(k = "x", at_each_domain(uni_adj %>% is_Go()))) %and%
+          none_of(at_each_endpoint(is_negatively_significant))
+    )
+)
+```
+
+```{r}
+go.regions <- list(
+  go.A = effect_is_gt("tv"),
+  go.B = at_least_k(
+    k = 2,
+    at_each_domain(effect_is_gt("tv"))
+  ) %and%
+    for_all_endpoints(effect_is_gt(0)),
+  go.C = at_least_k(k = 2, at_each_domain(effect_is_gt("tv"))) %and%
+    for_all_endpoints(effect_is_gt(0)) %and%
+    (effect_is_gt("tv") %at_domain% "d1"),
+  go.D = at_least_all_but_1(at_each_domain(effect_is_gt("tv"))) %and%
+    for_all_endpoints(effect_is_gt(0)),
+  go.E = effect_is_gt(0) %and% (effect_is_gt("tv") %at_domains% (!"d1"))
+)
+stop.regions <- list(
+  stop.A = effect_is_lt("lrv"),
+  stop.B = at_least_all_but_1(at_each_domain(effect_is_lt(0))) %and%
+    for_all_endpoints(effect_is_lt("lrv")),
+  stop.C = effect_is_lt(0),
+  stop.D = at_least_1(at_each_domain(effect_is_lt(0))) %and%
+    for_all_endpoints(effect_is_lt("lrv")),
+  stop.E = at_least_all_but_1(at_each_domain(effect_is_lt(0))) %and%
+    for_all_endpoints(effect_is_lt("tv")),
+  stop.F = at_least_all_but_1(at_each_domain(effect_is_lt(0))) %and%
+    (effect_is_lt(0) %at_domain% "d1") %and%
+    for_all_endpoints(effect_is_lt("tv")),
+  stop.G = at_least_all_but_k(k = 2, at_each_domain(effect_is_lt(0))) %and%
+    for_all_endpoints(effect_is_lt("lrv")),
+  stop.H = for_all_endpoints(effect_is_lt("lrv")) %and%
+    # at_least_k(k=2, at_each_domain(effect_is_lt(0))) %and%
+    (effect_is_lt("0") %at_domain% "d1"),
+  stop.I = effect_is_lt("lrv") %and% (effect_is_lt(0) %at_domains% (!"d1"))
+)
+
+DEFAULT.PARAMS <- list(
+  "p.FS" = 0.1, "p.FG" = 0.2, "alpha" = 0.05,
+  "x" = 2, "z" = 0
+)
+```
+
+```{r}
+GET.SCENARIO <- function(trial.name) {
+  trial <- TRIAL[[trial.name]]
+  make_scenario(
+    trial = trial,
+    go.regions = go.regions,
+    stop.regions = stop.regions
+  ) %>% expand_regions()
+}
+```
+
+```{r}
+GET.SCENARIO("D=3.V=5.Vd=1_1_3.ρ=(0.4).τ=(0).N=17")$region.points
+```
+```{r}
+sim <- GET.SCENARIO("D=2.V=4.Vd=2_2.ρ=(0.4).τ=(0).N=17") %>%
+  simulate_with_policy((uni_adj %>% has_stop()) %at_domain% "d1",
+    N = 1
+  )
+
+sim %>%
+  with_params(DEFAULT.PARAMS)
+```
+
+```{r}
+GET.SIM <- function(scenario.name, policy.name) {
+  if (policy.name == "hierarchical_domains" &&
+    parse_dot_name(scenario.name)$D == "2") {
+    return(NULL)
+  }
+  scenario <- GET.SCENARIO(scenario.name)
+  policy.schema <- POLICY[[policy.name]]
+  sim <- run_experiment_inline(paste("sim_20220311_1319", scenario.name, policy.name, sep = "_"),
+    function(N, cores, splits) {
+      scenario %>%
+        simulate_with_policy(policy.schema,
+          N = N,
+          cores = cores,
+          splits = splits,
+          verbose = TRUE,
+          simulate.fast = TRUE
+        )
+    },
+    N = 10000, cores = 1, splits = 1,
+    # quick.test = function(f) f(N = 5, cores = 1,splits=1),
+    depends.on = list(
+      scenario.name, policy.name,
+      paste0(scenario$region.points$region.name, collapse = "|")
+    ),
+    depend.on.function = FALSE
+  )
+  sim
+}
+# policy <- schema %>% instantiate_at(scenario$trial$endpoints)
+# mapply(SIMPLIFY=F,
+#   names(TRIAL),
+#   FUN = function(scenario.name) {
+#     res <- mapply(SIMPLIFY=F,
+#       names(POLICY),
+#       FUN = function(policy.name) {
+#         #if(!stringr::str_detect(scenario.name, "N=17")) return(NULL)
+#         #if(!stringr::str_detect(policy.name,   "lik")) return(NULL)
+#         # if(any(stringr::str_detect(policy.name,   c("hot","meas"))) &&
+#         #    (stringr::str_detect(scenario.name, "N=51") ||
+#         #     stringr::str_detect(scenario.name, "\\.mixed"))) return(NULL)
+#         sim.name <- paste0(scenario.name,".",policy.name)
+#         system(paste0("echo '",sim.name,"'"))
+#         sim <- GET.SIM(scenario.name, policy.name)
+#         if(is.null(sim)) { return(NULL) }
+#         dim(sim$all.criteria)
+#       })
+#     res
+#   }) %>% do.call(what=base::c)
+```
+
+
+```{r}
+names.TRIAL <- names(TRIAL)
+# n <- n[stringr::str_starts(n,"D=5.V=10")]
+SCENARIO.METRICS <-
+  parallel::mclapply(
+    mc.cores = 1, mc.preschedule = FALSE,
+    X = names.TRIAL, FUN = function(scenario.name) {
+      lapply(names(POLICY), function(policy.name) {
+        sim.name <- paste0(scenario.name, ".", policy.name)
+        system(paste0("echo '", sim.name, "'"))
+        run_experiment_inline(
+          depend.on.function = FALSE,
+          paste0("sim_20220311_1319_20r_SCENARIO_METRICS_", sim.name),
+          function() {
+            sim <- GET.SIM(scenario.name, policy.name)
+            if (is.null(sim)) {
+              return(NULL)
+            }
+            PARAMS <- list(
+              default = DEFAULT.PARAMS,
+              no.neg = {
+                params <- DEFAULT.PARAMS
+                # This is equivalent to disabling the negativity condition,
+                # but we don't need to recompute everything
+                params$alpha <- -1
+                params
+              },
+              only.one = {
+                params <- DEFAULT.PARAMS
+                params$x <- 1
+                params
+              }
+            )
+            lapply(names(PARAMS), function(params.name) {
+              params <- PARAMS[[params.name]]
+              sim.with.params <- sim %>% with_params(params)
+              sim.with.params %>%
+                four_metrics_all() %>%
+                mutate(
+                  scenario = !!scenario.name,
+                  policy = !!policy.name,
+                  params = !!params.name,
+                  .before = everything()
+                )
+            }) %>% bind_rows()
+          }
+        )
+      }) %>% bind_rows()
+    }
+  ) %>%
+  bind_rows() %>%
+  arrange(params)
+
+
+SCENARIO.METRICS <- SCENARIO.METRICS %>%
+  rowwise() %>%
+  summarise(
+    parse_dot_name(scenario) %>%
+      rename_with(function(x) paste0("scenario.", x)),
+    cur_data()
+  )
+
+# print(max(SCENARIO.METRICS$error.go.A,
+#           SCENARIO.METRICS$error.go.B,
+#           SCENARIO.METRICS$error.stop.A,
+#           SCENARIO.METRICS$error.stop.B1,
+#           SCENARIO.METRICS$error.stop.B2))
+
+SCENARIO.METRICS
+```
+  
+# Table 3.7 -- Results for the policy G^all.eq_2,0,0.05 for N = 17
+
+(table_domain_n_vars_comb_all_domains_equal_intra_0_inter_0_params_default.tex,
+ table_domain_n_vars_comb_all_domains_equal_intra_0.4_inter_0.2_params_default.tex)
+# Table 3.7 -- Results for the policy G^hier_2,0.05 for N = 17
+(table_domain_n_vars_comb_hierarchical_domains_intra_0_inter_0_params_default.tex,
+ table_domain_n_vars_comb_hierarchical_domains_intra_0.4_inter_0.2_params_default.tex
+ )
+```{r} 
+options(knitr.table.format = "latex")
+library(kableExtra)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+format_range <- function(xs, digits, culprits = NULL, type) {
+  if (type == "F") {
+    paste0(
+      format_round(max(xs), digits),
+      " {\\footnotesize -", format_round(max(xs) - min(xs), digits), "}"
+    )
+  } else {
+    paste0(
+      format_round(min(xs), digits),
+      " {\\footnotesize +", format_round(max(xs) - min(xs), digits), "}"
+    )
+  }
+}
+
+
+for (policy in names(POLICY)) {
+  for (corr.structure in list(
+    list(corr.intra = 0, corr.inter = 0),
+    list(corr.intra = 0.4, corr.inter = 0.2)
+  )) {
+    list2env(corr.structure, environment())
+    # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+    for (params in c("default", "no.neg")) {
+      df <- SCENARIO.METRICS %>%
+        # filter(scenario.vars == !!scenario.vars) %>%
+        filter(!!policy == "all_domains_equal" &
+          (scenario.D == 2 & scenario.V %in% c(2, 5, 8) |
+            scenario.D == 3 & scenario.V %in% c(3, 7, 10) |
+            scenario.D == 4 & scenario.V %in% c(4, 7, 10) |
+            scenario.D == 5 & scenario.V %in% c(5, 7, 10)) |
+          !!policy == "hierarchical_domains" &
+            (scenario.D == 3 & scenario.V %in% c(3, 5, 8, 10) |
+              scenario.D == 4 & scenario.V %in% c(4, 6, 8, 10) |
+              scenario.D == 5 & scenario.V %in% c(5, 8, 10))) %>%
+        filter(params == !!params) %>%
+        filter(policy == !!policy) %>%
+        filter(`scenario.ρ` == !!corr.intra) %>%
+        filter(`scenario.τ` == !!corr.inter) %>%
+        group_by(scenario.D, scenario.V) %>%
+        summarise(
+          CGr.TV  = format_range(CGr.go.A, 2, culprits = scenario.Vd, type = "C"),
+          FSr.TV  = format_range(FSr.go.A, 2, culprits = scenario.Vd, type = "F"),
+          FGr.LRV = format_range(FGr.stop.A, 2, culprits = scenario.Vd, type = "F"),
+          CSr.LRV = format_range(CSr.stop.A, 2, culprits = scenario.Vd, type = "F"),
+          CSr.0   = format_range(CSr.stop.C, 2, culprits = scenario.Vd, type = "C"),
+          FGr.0   = format_range(FGr.stop.C, 2, culprits = scenario.Vd, type = "F")
+        ) %>%
+        ungroup() %>%
+        arrange(scenario.D)
+      print(df)
+
+      table <- kbl(df %>% mutate(
+        scenario.D = NULL,
+        V = scenario.V,
+        scenario.V = NULL,
+        .before = everything()
+      ) %>%
+        rename(
+          "$\\CGr$" = CGr.TV,
+          "$\\FSr$" = FSr.TV,
+          "$\\FGr$" = FGr.LRV,
+          "$\\CSr$ " = CSr.LRV,
+          "$\\CSr$" = CSr.0,
+          "$\\FGr$ " = FGr.0
+        )
+      # %>%
+      # mutate(CGr = cell_spec(format_round(CGr,2), format="latex"),
+      #        CSr = cell_spec(format_round(CSr,2), format="latex"),
+      #        FGr = cell_spec(format_round(FGr,2), format="latex"),
+      #        FSr = cell_spec(format_round(FSr,2), format="latex"),
+      #        "CGr " = cell_spec(format_round(.CGr.TV,2), format="latex"),
+      #        "FGR " = cell_spec(format_round(.FGR.LRV,2), format="latex"),
+      #        "CSr " = cell_spec(format_round(.CSr.0,2), format="latex")
+      #        ) %>%
+      # select(!starts_with(".")) %>% rename(" " = Policy),
+      ,
+      "latex",
+      booktabs = T, escape = FALSE
+      )
+
+      for (scenario.D in unique(df$scenario.D)) {
+        table <- table %>% pack_rows(
+          paste0("D=", scenario.D),
+          min(which(df$scenario.D == scenario.D)),
+          max(which(df$scenario.D == scenario.D))
+        )
+      }
+      # table <- table %>% collapse_rows(columns = 1,  latex_hline = "major")
+      if (corr.inter == 0 || policy != "hierarchical_domains") {
+        table <- table %>% add_header_above(c(
+          " " = 1, # "Parameters"=0,
+          "$\\\\upcone{\\\\vTV}$" = 2, "$\\\\downcone{\\\\vLRV}$" = 2, "$\\\\downcone{\\\\vct{0}}$" = 2
+        ), escape = F)
+      }
+      table <- table %>% kable_styling(
+        latex_options = "striped", position = "left" # ,
+        # stripe_index = which(df$scenario.V %in% c(2,4,6,10))
+      )
+      table <- table %>% column_spec(c(3, 5), border_right = T)
+      file.name <- paste0("report/table_domain_n_vars_comb_", policy, "_intra_", corr.intra, "_inter_", corr.inter, "_params_", params, ".tex")
+      table %>% save_kable(file = file.name)
+      cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+    }
+  }
+}
+```
+
+
+# Table 3.11 (b) - Simulation results for the policy with and without the safety condition; regions with heterogeneous true effect.
+
+(table_domain_n_vars_comb_hierarchical__intra_0.4_inter_0.2_noneg_2.tex)
+
+```{r} 
+options(knitr.table.format = "latex")
+library(kableExtra)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+format_range <- function(xs, digits, culprits = NULL, type) {
+  if (type == "F") {
+    paste0(
+      format_round(max(xs), digits),
+      " {\\footnotesize -", format_round(max(xs) - min(xs), digits), "}"
+    )
+  } else {
+    paste0(
+      format_round(min(xs), digits),
+      " {\\footnotesize +", format_round(max(xs) - min(xs), digits), "}"
+    )
+  }
+}
+
+
+for (policy in "all_domains_equal") {
+  for (corr.structure in list(
+    list(corr.intra = 0, corr.inter = 0),
+    list(corr.intra = 0.4, corr.inter = 0.2)
+  )) {
+    list2env(corr.structure, environment())
+    # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+    # for(params in c("default","no.neg")) {
+    df <- SCENARIO.METRICS %>%
+      # filter(scenario.vars == !!scenario.vars) %>%
+      # filter(params   == !!params) %>%
+      filter(scenario.D >= 3) %>%
+      filter(scenario.D == 3 & scenario.V %in% c(3, 7, 10) |
+        scenario.D == 4 & scenario.V %in% c(4, 7, 10) |
+        scenario.D == 5 & scenario.V %in% c(5, 7, 10)) %>%
+      filter(policy == !!policy) %>%
+      filter(`scenario.τ` == !!corr.inter) %>%
+      filter(`scenario.ρ` == !!corr.intra) %>%
+      filter(params %in% c("default", "no.neg")) %>%
+      group_by(scenario.D, scenario.V, params) %>%
+      summarise(
+        # CGr.TV   = format_range(CGr.go.A, 2, culprits=scenario.Vd, type="C"),
+        # FGr.LRV  = format_range(FGr.stop.A, 2, culprits=scenario.Vd, type="F"),
+        FGr.LRV1 = format_range(FGr.stop.B, 2, culprits = scenario.Vd, type = "F"),
+        FGr.LRV1.ref = max(FGr.stop.B),
+        FGr.LRV2 = format_range(FGr.stop.G, 2, culprits = scenario.Vd, type = "F"),
+        FGr.LRV2.ref = max(FGr.stop.G),
+        CGr.TVn1 = format_range(CGr.go.D, 2, culprits = scenario.Vd, type = "C"),
+        CGr.TVn1.ref = min(CGr.go.D)
+        # CGr.TV2  = format_range(CGr.go.B, 2, culprits=scenario.Vd, type="C")
+      ) %>%
+      ungroup() %>%
+      arrange(scenario.D) %>%
+      mutate(CGr.TVn1 = ifelse(scenario.D < 3, "", CGr.TVn1)) %>%
+      pivot_wider(values_from = starts_with(c("FGr.LRV1", "FGr.LRV2", "CGr.TVn1")), names_from = params, names_sep = ".")
+    print(df)
+
+    table <- kbl(df %>% mutate(
+      scenario.D = NULL,
+      V = scenario.V,
+      scenario.V = NULL,
+      .before = everything()
+    ) %>%
+      mutate(
+        FGr.LRV1.default = cell_spec(FGr.LRV1.default, bold = df$FGr.LRV1.ref.default < df$FGr.LRV1.ref.no.neg, escape = F, format = "latex"),
+        FGr.LRV1.no.neg  = cell_spec(FGr.LRV1.no.neg, bold = df$FGr.LRV1.ref.default > df$FGr.LRV1.ref.no.neg, escape = F, format = "latex"),
+        FGr.LRV2.default = cell_spec(FGr.LRV2.default, bold = df$FGr.LRV2.ref.default < df$FGr.LRV2.ref.no.neg, escape = F, format = "latex"),
+        FGr.LRV2.no.neg  = cell_spec(FGr.LRV2.no.neg, bold = df$FGr.LRV2.ref.default > df$FGr.LRV2.ref.no.neg, escape = F, format = "latex"),
+        CGr.TVn1.default = cell_spec(CGr.TVn1.default, bold = df$CGr.TVn1.ref.default > df$CGr.TVn1.ref.no.neg, escape = F, format = "latex"),
+        CGr.TVn1.no.neg  = cell_spec(CGr.TVn1.no.neg, bold = df$CGr.TVn1.ref.default < df$CGr.TVn1.ref.no.neg, escape = F, format = "latex")
+        # CGr.TV2.default = cell_spec(CGr.TV2.default,  bold=df$CGr.TV2.default  > df$CGr.TV2.no.neg,  escape=F, format="latex"),
+        # CGr.TV2.no.neg  = cell_spec(CGr.TV2.no.neg,  bold=df$CGr.TV2.default  < df$CGr.TV2.no.neg,  escape=F, format="latex")
+      ) %>%
+      select(!contains(".ref")) %>%
+      rename(
+        "with.cond" =  FGr.LRV1.default,
+        "w/o.cond" =  FGr.LRV1.no.neg,
+        "with.cond " =  FGr.LRV2.default,
+        "w/o.cond " =  FGr.LRV2.no.neg,
+        "with.cond  " = CGr.TVn1.default,
+        "w/o.cond  " = CGr.TVn1.no.neg
+        # "with.cond " =CGr.TV2.default,
+        # "w/o.cond " = CGr.TV2.no.neg)
+      ),
+    "latex",
+    booktabs = T, escape = FALSE
+    )
+
+    for (scenario.D in unique(df$scenario.D)) {
+      table <- table %>% pack_rows(
+        paste0("D=", scenario.D),
+        min(which(df$scenario.D == scenario.D)),
+        max(which(df$scenario.D == scenario.D))
+      )
+    }
+    # table <- table %>% collapse_rows(columns = 1,  latex_hline = "major")
+    table <- table %>% add_header_above(c(
+      " " = 1, # "Parameters"=0,
+      # "$\\\\downcone{\\\\vLRV}$"=1,
+      "$\\\\FGr$ at $\\\\RCStopLRVone$" = 2,
+      "$\\\\FGr$ at $\\\\RCStopLRVtwo$" = 2,
+      "$\\\\CGr$ at $\\\\RCGoTVNegOne$" = 2 # ,
+      # "$\\\\CGr$ at $\\\\RCGoTVtwo$"=2
+    ), escape = F)
+    table <- table %>% kable_styling(
+      latex_options = "striped", position = "left" # ,
+      # stripe_index = which(df$scenario.V %in% c(2,4,6,10))
+    )
+    table <- table %>% column_spec(c(3, 5), border_right = T)
+    file.name <- paste0(
+      "report/table_domain_n_vars_comb_", policy, "_intra_", corr.intra,
+      "_inter_", corr.inter, "_noneg_2.tex"
+    )
+    table %>% save_kable(file = file.name)
+    cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+  }
+}
+```
+
+# Table 3.12 – Comparison between a hierarchical policy and an "al domains equal" policy for heterogeneous true effects.
+(table_hier_cmp_intra_0_inter_0_hier_2_no.neg.tex,
+table_hier_cmp_intra_0.4_inter_0.2_hier_2_no.neg.tex)
+
+
+```{r} 
+options(knitr.table.format = "latex")
+library(kableExtra)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+format_range <- function(xs, digits, type) {
+  if (type == "F") {
+    paste0(
+      format_round(max(xs), digits),
+      " {\\footnotesize -", format_round(max(xs) - min(xs), digits), "}"
+    )
+  } else {
+    paste0(
+      format_round(min(xs), digits),
+      " {\\footnotesize +", format_round(max(xs) - min(xs), digits), "}"
+    )
+  }
+}
+
+
+for (corr.structure in list(
+  list(corr.intra = 0, corr.inter = 0),
+  list(corr.intra = 0.4, corr.inter = 0.2)
+)) {
+  list2env(corr.structure, environment())
+  # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+  for (params in c("default", "no.neg")) {
+    df <- SCENARIO.METRICS %>%
+      # filter(scenario.vars == !!scenario.vars) %>%
+      filter(params == !!params) %>%
+      filter(scenario.D == 3 & scenario.V %in% c(3, 7, 10) |
+        scenario.D == 4 & scenario.V %in% c(4, 7, 10) |
+        scenario.D == 5 & scenario.V %in% c(5, 7, 10)) %>%
+      # filter(policy   == !!policy) %>%
+      filter(`scenario.τ` == !!corr.inter) %>%
+      filter(`scenario.ρ` == !!corr.intra) %>%
+      # filter(params %in% c("default")) %>%
+      group_by(scenario.D, scenario.V, policy) %>%
+      summarise(
+        # CGr.TV   = format_range(CGr.go.A, 2, culprits=scenario.Vd, type="C"),
+        # FGr.LRV  = format_range(FGr.stop.A, 2, culprits=scenario.Vd, type="F"),
+        CSr.stop.H  = format_range(CSr.stop.H, 2, type = "C"),
+        FGr.stop.H  = format_range(FGr.stop.H, 2, type = "F"),
+        CGr.go.C    = format_range(CGr.go.C, 2, type = "C")
+      ) %>%
+      ungroup() %>%
+      arrange(scenario.D) %>%
+      pivot_wider(values_from = c("CSr.stop.H", "FGr.stop.H", "CGr.go.C"), names_from = policy, names_sep = ".")
+    print(df)
+
+    table <- kbl(df %>% mutate(
+      scenario.D = NULL,
+      V = scenario.V,
+      scenario.V = NULL,
+      .before = everything()
+    ) %>%
+      # rowwise()%>%
+      # cell_spec(format_round(CGr,2), bold = .CGr.is.max,format="latex"),
+      mutate(
+        CSr.stop.H.all_domains_equal = cell_spec(CSr.stop.H.all_domains_equal, bold = df$CSr.stop.H.all_domains_equal > df$CSr.stop.H.hierarchical_domains, format = "latex", escape = FALSE),
+        CSr.stop.H.hierarchical_domains = cell_spec(CSr.stop.H.hierarchical_domains, bold = df$CSr.stop.H.all_domains_equal < df$CSr.stop.H.hierarchical_domains, format = "latex", escape = FALSE),
+        FGr.stop.H.all_domains_equal = cell_spec(FGr.stop.H.all_domains_equal, bold = df$FGr.stop.H.all_domains_equal < df$FGr.stop.H.hierarchical_domains, format = "latex", escape = FALSE),
+        FGr.stop.H.hierarchical_domains = cell_spec(FGr.stop.H.hierarchical_domains, bold = df$FGr.stop.H.all_domains_equal > df$FGr.stop.H.hierarchical_domains, format = "latex", escape = FALSE),
+        CGr.go.C.all_domains_equal = cell_spec(CGr.go.C.all_domains_equal, bold = df$CGr.go.C.all_domains_equal > df$CGr.go.C.hierarchical_domains, format = "latex", escape = FALSE),
+        CGr.go.C.hierarchical_domains = cell_spec(CGr.go.C.hierarchical_domains, bold = df$CGr.go.C.all_domains_equal < df$CGr.go.C.hierarchical_domains, format = "latex", escape = FALSE)
+      ) %>%
+      ungroup() %>%
+      rename(
+        "all.eq" = CSr.stop.H.all_domains_equal,
+        "hier" = CSr.stop.H.hierarchical_domains,
+        "all.eq " = FGr.stop.H.all_domains_equal,
+        "hier " = FGr.stop.H.hierarchical_domains,
+        "all.eq  " = CGr.go.C.all_domains_equal,
+        "hier  " = CGr.go.C.hierarchical_domains
+      ),
+    "latex",
+    booktabs = T, escape = FALSE
+    )
+
+    for (scenario.D in unique(df$scenario.D)) {
+      table <- table %>% pack_rows(
+        paste0("D=", scenario.D),
+        min(which(df$scenario.D == scenario.D)),
+        max(which(df$scenario.D == scenario.D))
+      )
+    }
+    # table <- table %>% collapse_rows(columns = 1,  latex_hline = "major")
+    # if(corr.inter == 0) {
+    table <- table %>% add_header_above(c(
+      " " = 1, # "Parameters"=0,
+      # "$\\\\downcone{\\\\vLRV}$"=1,
+      "$\\\\CSr$ at $\\\\RCStopHier$" = 2,
+      "$\\\\FGr$ at $\\\\RCStopHier$" = 2,
+      "$\\\\CGr$ at $\\\\RCGoHier$" = 2
+    ), escape = F)
+    # }
+
+    table <- table %>% kable_styling(
+      latex_options = "striped", position = "left" # ,
+      # stripe_index = which(df$scenario.V %in% c(2,4,6,10))
+    )
+    table <- table %>% column_spec(c(3, 5), border_right = TRUE)
+    file.name <- paste0("report/table_hier_cmp_intra_", corr.intra, "_inter_", corr.inter, "_hier_2_", params, ".tex")
+    table %>% save_kable(file = file.name)
+    cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+  }
+}
+```
+
+# Figure 3.15 - Correct Go and Stop rates of Policies G^all.eq.with.cond_2,0 and G^hier.w/o.cond_x:=2 for true effects in the regions R^Go_hier and R^Stop_hier.
+(plot_hier_2_no_neg.tex.fig)
+
+```{r}
+file.name <- "report/plot_hier_2_no_neg.tex.fig"
+
+dd <- (SCENARIO.METRICS %>%
+  filter(
+    params == "no.neg",
+    `scenario.τ` == 0.2 & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0
+  ) %>%
+  filter(scenario.V == 4 * scenario.D |
+    scenario.V == scenario.D |
+    (scenario.V %in% c(2, 5, 8) & scenario.D == 2) |
+    (scenario.D != 2 & !(scenario.V %in% c(3, 5, 6, 8, 9)))) %>%
+  # filter(policy   == "all_domains_equal") %>%
+  mutate(corr = paste0("$\\rho=", `scenario.ρ`, ", \\tau=", `scenario.τ`, "$")) %>%
+  mutate(corr = factor(corr, levels = unique(corr))) %>%
+  # mutate(policy = stringr::str_replace_all(pattern="_",replacement="\\\\_",policy))%>%
+  arrange(scenario.D, scenario.V) %>%
+  mutate(DV = ifelse(
+    scenario.D == scenario.V,
+    paste0("D=", scenario.D, ", V=", scenario.V),
+    paste0("\\phantom{", scenario.D, "}", "“, V=", scenario.V)
+  )) %>%
+  mutate(DV = factor(DV, levels = rev(unique(DV)))) %>%
+  group_by(policy, scenario.D, scenario.V, DV, corr, params) %>%
+  summarise(
+    CGr.TV_value.min = min(CGr.go.C),
+    CSr.0_value.max = max(CSr.stop.H),
+    CGr.TV_value.max = max(CGr.go.C),
+    CSr.0_value.min = min(CSr.stop.H),
+    CGr.TV_value.median = min(CGr.go.C),
+    CSr.0_value.median = min(CSr.stop.H)
+  ) %>%
+  pivot_longer(
+    cols = starts_with("CGr.TV") | starts_with("CSr.0"),
+    names_sep = "_",
+    names_to = c("metric", ".value")
+  ) %>%
+  ungroup() %>%
+  mutate(metric = list(
+    CGr.TV = "CGr at $R^{\\mathrm{Go}}_{\\mathrm{hier}}$",
+    CSr.0 = "CSr at $R^{\\mathrm{Stop}}_{\\mathrm{hier}}$"
+  )[metric] %>% unlist()) %>%
+  mutate(metric = factor(metric, levels = unique(metric))) %>%
+  mutate(policy = list(
+    all_domains_equal = "$G^{\\mathrm{all.eq.w/o.cond}}_{x:=2,z:=0}$",
+    hierarchical_domains = "$G^{\\mathrm{hier.w/o.cond}}_{x:=2}$"
+  )[policy] %>% unlist())
+)
+gg <- ggplot(dd) +
+  facet_grid(corr ~ metric, scales = "free_x") +
+  # geom_rect(xmin=-Inf, ymin=-Inf,
+  #           aes(fill = metric),
+  #           alpha=0.1, xmax=+Inf, ymax=+Inf,
+  #           data = dd %>% select(metric) %>% distinct(),
+  #           show.legend = FALSE)+
+  # scale_fill_manual(values = list(decision.colors$Go, decision.colors$Stop))+
+  geom_tile( # y=scenario.Vd,
+    aes(x = y, y = DV, fill = metric, alpha = factor(scenario.D %% 2)),
+    width = +Inf, height = 1,
+    data = dd %>%
+      group_by(metric, scenario.D, DV) %>%
+      summarise(y = median(value.median)) %>%
+      ungroup(),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = c(decision.colors$Go, decision.colors$Stop)) +
+  scale_alpha_manual(values = c("1" = 0.1, "0" = 0.02)) +
+  geom_linerange(aes(
+    y = DV, xmin = value.min, xmax = value.max,
+    col = policy
+  ), size = 1.35, show_guide = FALSE) +
+  geom_point(aes(
+    y = DV, x = value.median,
+    col = policy
+  )) +
+  theme(legend.position = "bottom") +
+  labs(x = "Go/Stop rate", y = "", col = "Policy") +
+  scale_x_continuous(
+    labels = function(x) scales::percent(x, suffix = "\\%", accuracy = 1),
+    limits = function(x) {
+      if (x[1] < 0.25) {
+        x[1] <- 0
+      } else if (x[1] < 0.6) {
+        x[1] <- 0.5
+      }
+      if (x[2] > 0.75) {
+        x[2] <- 1
+      }
+      x
+    }
+  ) +
+  scale_colour_Publication() +
+  theme_Publication()
+print(gg)
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.7, height = 7.5
+)
+# dev.off()
+print(gg)
+dev.off()
+cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+```
+
+# Figure 3.16 – Detail of Figure 3.15 for D = 3,4,5 and V = 7.
+(plot_hier_2_no_neg_detail.tex.fig)
+
+```{r, fig.height=11,fig.width=9}
+file.name <- "report/plot_hier_2_no_neg_detail.tex.fig"
+
+format_vd_list <- function(vds) {
+  t <- stringr::str_replace_all(pattern = "_", replacement = ",", vds)
+  t <- stringr::str_replace(t, "^([0-9])", "\\\\underline{\\1}")
+  factor(t, levels = unique(t))
+}
+
+
+dd <- (SCENARIO.METRICS %>%
+  filter(
+    params == "no.neg",
+    `scenario.τ` == 0.2 & `scenario.ρ` == 0.4 |
+      # `scenario.τ` == 0   & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0
+  ) %>%
+  filter(scenario.D > 2 & scenario.V == 7) %>%
+  mutate(scenario.V1 = as.integer(stringr::str_extract(scenario.Vd, "^[0-9]"))) %>%
+  # filter(policy   == "all_domains_equal") %>%
+  mutate(corr = paste0("$\\rho=", `scenario.ρ`, ", \\tau=", `scenario.τ`, "$")) %>%
+  mutate(corr = factor(corr, levels = unique(corr))) %>%
+  # mutate(policy = stringr::str_replace_all(pattern="_",replacement="\\\\_",policy))%>%
+  arrange(scenario.D, scenario.V) %>%
+  mutate(DV = ifelse(
+    scenario.D == scenario.V,
+    paste0("D=", scenario.D, ", V=", scenario.V),
+    paste0("\\phantom{", scenario.D, "}", "“, V=", scenario.V)
+  )) %>%
+  mutate(DV = factor(DV, levels = unique(DV))) %>%
+  # group_by(policy, scenario.D, scenario.V, DV, corr, params) %>%
+  # summarise(
+  #   CGr.TV_value.min  = min(CGr.go.C),
+  #   CSr.0_value.max = max(CSr.stop.H),
+  #   CGr.TV_value.max  = max(CGr.go.C),
+  #   CSr.0_value.min = min(CSr.stop.H),
+  #   CGr.TV_value.median  = min(CGr.go.C),
+  #   CSr.0_value.median = min(CSr.stop.H)
+  # ) %>%
+  mutate(
+    CGr.TV = CGr.go.C,
+    CSr.0 = CSr.stop.H
+  ) %>%
+  pivot_longer(
+    cols = starts_with("CGr.TV") | starts_with("CSr.0"),
+    names_to = c("metric")
+  ) %>%
+  ungroup() %>%
+  mutate(metric = list(
+    CGr.TV = "CGr at $R^{\\mathrm{Go}}_{\\mathrm{hier}}$",
+    CSr.0 = "CSr at $R^{\\mathrm{Stop}}_{\\mathrm{hier}}$"
+  )[metric] %>% unlist()) %>%
+  mutate(metric = factor(metric, levels = unique(metric))) %>%
+  mutate(policy = list(
+    all_domains_equal = "$G^{\\mathrm{all.eq.w/o.cond}}_{x:=2,z:=0}$",
+    hierarchical_domains = "$G^{\\mathrm{hier.w/o.cond}}_{x:=2}$"
+  )[policy] %>% unlist()) %>%
+  arrange(scenario.D, scenario.V, scenario.Vd) %>%
+  mutate(scenario.Vd = factor(scenario.Vd, levels = rev(unique(scenario.Vd))))
+)
+gg <- ggplot(dd) +
+  facet_grid(corr ~ metric, scales = "free") +
+  geom_tile( # y=scenario.Vd,
+    aes(x = .5, y = scenario.Vd, fill = metric, alpha = factor(scenario.D %% 2)),
+    width = +Inf, height = 1,
+    data = dd %>% select(corr, metric, scenario.D, scenario.Vd) %>% distinct(),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = list(decision.colors$Go, decision.colors$Stop)) +
+  # geom_linerange(aes(y=forcats::fct_rev(DV), xmin=value.min, xmax=value.max,
+  #               col=policy), size=1.35, show_guide=FALSE)+
+  geom_point(aes(
+    y = scenario.Vd, x = value,
+    col = policy
+  )) +
+  theme(legend.position = "bottom") +
+  labs(x = "Go/Stop rate", y = "", col = "Policy") +
+  ylab("Grouping of variables into domains (\\underline{$V_1$}$,V_2,…,V_D$)") +
+  scale_y_discrete(labels = format_vd_list) +
+  scale_x_continuous(
+    labels = function(x) scales::percent(x, suffix = "\\%", accuracy = 1),
+    limits = function(x) {
+      if (x[1] < 0.25) {
+        x[1] <- 0
+      } else if (x[1] < 0.6) {
+        x[1] <- 0.5
+      }
+      if (x[2] > 0.75) {
+        x[2] <- 1
+      }
+      x
+    }
+  ) +
+  scale_alpha_manual(values = c("1" = 0.1, "0" = 0.02)) +
+  scale_colour_Publication() +
+  theme_Publication()
+print(gg)
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.7, height = 7.5
+)
+# dev.off()
+print(gg)
+dev.off()
+cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+```
+
+# Table 3.11 (a) - Simulation results for the policy with and without the safety condition; regions with homogeneous true effect.
+(table_domain_n_vars_comb_all_domains_equal_intra_0.4_inter_0.2_noneg_2_usual.tex)
+
+```{r} 
+options(knitr.table.format = "latex")
+library(kableExtra)
+
+format_round <- function(x, digits) format(round(x, digits), nsmall = digits)
+format_range <- function(xs, digits, culprits = NULL, type) {
+  if (type == "F") {
+    paste0(
+      format_round(max(xs), digits),
+      " {\\footnotesize -", format_round(max(xs) - min(xs), digits), "}"
+    )
+  } else {
+    paste0(
+      format_round(min(xs), digits),
+      " {\\footnotesize +", format_round(max(xs) - min(xs), digits), "}"
+    )
+  }
+}
+
+for (policy in "all_domains_equal") {
+  for (corr.structure in list(list(corr.intra = 0.4, corr.inter = 0.2))) {
+    list2env(corr.structure, environment())
+    # for(scenario.vars in unique(SCENARIO.METRICS$scenario.vars)){
+    # for(params in c("default","no.neg")) {
+    df <- SCENARIO.METRICS %>%
+      # filter(scenario.vars == !!scenario.vars) %>%
+      # filter(params   == !!params) %>%
+      filter(scenario.D >= 2) %>%
+      filter(scenario.D == 3 & scenario.V %in% c(3, 7, 10) |
+        scenario.D == 4 & scenario.V %in% c(4, 7, 10) |
+        scenario.D == 5 & scenario.V %in% c(5, 7, 10)) %>%
+      filter(policy == !!policy) %>%
+      filter(`scenario.τ` == !!corr.inter) %>%
+      filter(`scenario.ρ` == !!corr.intra) %>%
+      filter(params %in% c("default", "no.neg")) %>%
+      group_by(scenario.D, scenario.V, params) %>%
+      summarise(
+        FGr.0 = format_range(FGr.stop.C, 2, culprits = scenario.Vd, type = "F"),
+        FGr.0.ref = max(FGr.stop.C),
+        FGr.LRV = format_range(FGr.stop.A, 2, culprits = scenario.Vd, type = "F"),
+        FGr.LRV.ref = max(FGr.stop.A),
+        CGr.TV = format_range(CGr.go.A, 2, culprits = scenario.Vd, type = "C"),
+        CGr.TV.ref = min(CGr.go.A)
+        # FGr.TV1  = format_range(FGr.stop.D, 2, culprits=scenario.Vd, type="F"),
+        # CGr.TV2  = format_range(CGr.go.B, 2, culprits=scenario.Vd, type="C")
+      ) %>%
+      ungroup() %>%
+      arrange(scenario.D) %>%
+      pivot_wider(values_from = starts_with(c("FGr.0", "FGr.LRV", "CGr.TV")), names_from = params, names_sep = ".")
+    print(df)
+
+    table <- kbl(df %>% mutate(
+      scenario.D = NULL,
+      V = scenario.V,
+      scenario.V = NULL,
+      .before = everything()
+    ) %>%
+      mutate(
+        FGr.0.default = cell_spec(FGr.0.default, bold = df$FGr.0.ref.default < df$FGr.0.ref.no.neg, escape = F, format = "latex"),
+        FGr.0.no.neg = cell_spec(FGr.0.no.neg, bold = df$FGr.0.ref.default > df$FGr.0.ref.no.neg, escape = F, format = "latex"),
+        FGr.LRV.default = cell_spec(FGr.LRV.default, bold = df$FGr.LRV.ref.default < df$FGr.LRV.ref.no.neg, escape = F, format = "latex"),
+        FGr.LRV.no.neg = cell_spec(FGr.LRV.no.neg, bold = df$FGr.LRV.ref.default > df$FGr.LRV.ref.no.neg, escape = F, format = "latex"),
+        CGr.TV.default = cell_spec(CGr.TV.default, bold = df$CGr.TV.ref.default > df$CGr.TV.ref.no.neg, escape = F, format = "latex"),
+        CGr.TV.no.neg = cell_spec(CGr.TV.no.neg, bold = df$CGr.TV.ref.default < df$CGr.TV.ref.no.neg, escape = F, format = "latex")
+      ) %>%
+      select(!contains(".ref")) %>%
+      rename( # "with.neg" = FGr.LRV.no.neg,
+        "with.cond" = FGr.0.default,
+        "w/o.cond" = FGr.0.no.neg,
+        "with.cond  " = FGr.LRV.default,
+        "w/o.cond  " = FGr.LRV.no.neg,
+        "with.cond " = CGr.TV.default,
+        "w/o.cond " = CGr.TV.no.neg
+      ),
+    "latex",
+    booktabs = T, escape = FALSE
+    )
+
+    for (scenario.D in unique(df$scenario.D)) {
+      table <- table %>% pack_rows(
+        paste0("D=", scenario.D),
+        min(which(df$scenario.D == scenario.D)),
+        max(which(df$scenario.D == scenario.D))
+      )
+    }
+    # table <- table %>% collapse_rows(columns = 1,  latex_hline = "major")
+    table <- table %>% add_header_above(c(
+      " " = 1, # "Parameters"=0,
+      "$\\\\FGr$ at $\\\\downcone{\\\\vNoEffect}$" = 2,
+      "$\\\\FGr$ at $\\\\downcone{\\\\vLRV}$" = 2,
+      "$\\\\CGr$ at $\\\\upcone{\\\\vTV}$" = 2
+    ), escape = F)
+    table <- table %>% kable_styling(
+      latex_options = "striped", position = "left" # ,
+      # stripe_index = which(df$scenario.V %in% c(2,4,6,10))
+    )
+    table <- table %>% column_spec(c(3, 5), border_right = T)
+    file.name <- paste0("report/table_domain_n_vars_comb_", policy, "_intra_", corr.intra, "_inter_", corr.inter, "_noneg_2_usual.tex")
+    table %>% save_kable(file = file.name)
+    cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+  }
+}
+```
+
+# Figure 3.14 - Effect of a safety condition in the absence of an effect in one domain.
+(plot_effect_TV_nonneg_goM1_etc.tex.fig)
+
+```{r, fig.width=10,fig.height=11}
+format_vd_list <- function(vds) {
+  t <- stringr::str_replace_all(pattern = "_", replacement = ",", vds)
+  t <- stringr::str_replace(t, "^([0-9])", "\\\\underline{\\1}")
+  factor(t, levels = unique(t))
+}
+
+sum_vD <- function(vds) {
+  t <- as.integer(stringr::str_split(vds, "_", simplify = T))
+  sum(t)
+}
+
+
+is_unsorted_Vd <- function(x) {
+  sapply(x, function(v) is.unsorted(as.numeric(stringr::str_split(v, "_", simplify = TRUE))))
+}
+# options(ggplot2.continuous.fill = scale_fill_distiller)
+df <- SCENARIO.METRICS %>%
+  mutate(scenario.V1 = as.integer(stringr::str_extract(scenario.Vd, "^[0-9]"))) %>%
+  mutate(scenario.V2D = Vectorize(sum_vD)(scenario.Vd) - scenario.V1) %>%
+  filter(
+    scenario.D %in% c(3, 5),
+    # scenario.V == 8,
+    # `scenario.τ` == 0,
+    # `scenario.ρ` == 0.4,
+    `scenario.τ` == 0 & `scenario.ρ` == 0 |
+      `scenario.τ` == 0.2 & `scenario.ρ` == 0.4,
+    scenario.V2D == scenario.D - 1 | scenario.V2D == 10 - 4,
+    # !is_unsorted_Vd(scenario.Vd),
+    policy %in% c(
+      "all_domains_equal"
+      # ,"hierarchical_domains"
+    )
+  ) %>%
+  mutate(params = factor(params, levels = c("default", "no.neg"))) %>%
+  filter(!is.na(params)) %>%
+  # pivot_longer(cols=c("CGr.go.D", "CGr.go.D"), names_to="region") %>%
+  mutate(corr = paste0(`scenario.ρ`, "_", `scenario.τ`)) %>%
+  pivot_longer(cols = c("CGr.go.A", "CGr.go.E"), names_prefix = "CGr\\.", names_to = "effect", values_to = "CGr") %>%
+  select(
+    params, scenario.D, scenario.V, scenario.V1, scenario.V2D, scenario.Vd, policy, corr,
+    effect, CGr
+  ) %>%
+  ungroup() %>%
+  arrange(scenario.V, scenario.D, scenario.Vd) %>%
+  # mutate(scenario.D = paste0("D=",scenario.D)) %>%
+  # mutate(scenario.V = ifelse(scenario.V==2,
+  #                            "“2",
+  #                            paste0("V=",scenario.V)))%>%
+  mutate(
+    scenario.V = factor(scenario.V, levels = unique(scenario.V)),
+    scenario.Vd = factor(scenario.Vd, levels = unique(scenario.Vd)),
+    # params = forcats::fct_rev(factor(params)),
+    corr = factor(corr, levels = unique(corr))
+  ) %>%
+  mutate(paired = paste0(scenario.Vd, "|", scenario.D, "|", corr)) %>%
+  mutate(paired = factor(paired, levels = rev(unique(paired)))) %>%
+  arrange(params) %>%
+  mutate(scenario.Vd = forcats::fct_rev(scenario.Vd))
+gg <- ggplot(df, aes(x = scenario.Vd, y = CGr, group = paired, col = corr)) +
+  geom_tile(
+    data = df %>% select(
+      scenario.D, scenario.V2D, policy,
+      scenario.Vd, scenario.V1,
+      paired, policy
+    ) %>% distinct(),
+    aes(
+      y = 1, height = Inf, fill = factor(scenario.V1), alpha = factor(scenario.V1 %% 2),
+      col = NULL
+    ),
+    show.legend = c("col" = F, "fill" = T, "alpha" = F)
+  ) +
+  geom_point(aes(shape = effect),
+    position = position_dodge(width = 0.6)
+  )
+for (effect in "go.E") {
+  gg <- gg + geom_line(
+    data = df %>% filter(effect == !!effect),
+    arrow = arrow(length = unit(0.15, "cm"), type = "closed", ends = "last"),
+    position = position_dodge(width = 0.6),
+    aes(group = paired, linetype = "linetype"),
+    show.legend = c(color = F, "linetype" = T)
+  )
+}
+gg <- gg + scale_color_manual(
+  labels = c(
+    "0_0" = "$\\rho=0, \\tau=0$",
+    "0.4_0.2" = "$\\rho=0.4, \\tau=0.2$"
+  ),
+  values = c("#386cb0", "#ef3b2c")
+) +
+  coord_flip() +
+  facet_grid(scenario.D + scenario.V2D ~ .,
+    scales = "free_y", space = "free",
+    labeller = labeller(
+      scenario.D = function(x) paste0("D=", x),
+      scenario.V2D = function(x) paste0("$V=V_1+", x, "$"),
+      policy = c(
+        "all_domains_equal" = "$G^{\\mathrm{all.eq}}$",
+        "hierarchical_domains" = "$G^{\\mathrm{hier}}$"
+      )
+    )
+  ) +
+  xlab("Grouping of variables into domains (\\underline{$V_1$}$,V_2,…,V_D$)") +
+  ylab("\\%Go") +
+  # guides(col = guide_legend(reverse = TRUE))+
+  labs(
+    shape = "True effect", color = "Correlation", linetype = "",
+    fill = "$V_1=$"
+  ) +
+  # scale_shape_manual(values=list(`0` = 16,`0.4` = 1))+
+  scale_y_continuous(labels = function(x) scales::percent(x, suffix = "\\%", accuracy = 1), limits = c(NA, 1)) +
+  scale_x_discrete(labels = format_vd_list) +
+  scale_linetype_manual(
+    values = "dotted",
+    labels = "From “with.cond” to “w/o.cond”\n(No difference for true effect $\\vTV$)"
+  ) +
+  scale_fill_manual(
+    values = c(
+      "1" = decision.colors$Go,
+      "2" = decision.colors$Go,
+      "3" = decision.colors$Go,
+      "4" = decision.colors$Go
+    ),
+    guide = NULL
+  ) +
+  # guide = guide_legend(label.position="bottom", direction="horizontal"),
+  # high=rgb(255,255,205,maxColorValue = 255),
+  # ,
+  #  n.breaks=4,
+  #  breaks=seq(4))+
+  scale_alpha_manual(values = c("0" = 0.1, "1" = 0.02), guide = NULL) +
+  scale_shape_Publication(
+    labels = c(
+      "$\\vTV$",
+      "$\\RCGoNotFirstTV$"
+    )
+  ) +
+  theme_Publication() +
+  theme(
+    legend.position = "bottom", legend.box = "vertical",
+    legend.margin = margin()
+  )
+# dev.off()
+print(gg)
+file.name <- "report/plot_effect_TV_nonneg_goM1_etc.tex.fig"
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.8, height = 7.1
+)
+print(gg)
+dev.off()
+
+cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+```
+
+# Figure 3.7 - False Go rate (FGr) and Correct Go rate (CGr) for G^all.eq_2,0,0.05 and G^hier_2,0.05.
+
+```{r}
+file.name <- "report/plot_go_rate_policies_bis.tex.fig"
+dd <- SCENARIO.METRICS %>%
+  filter(
+    params == "default",
+    `scenario.τ` == 0.2 & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0
+  ) %>%
+  filter(scenario.V == 4 * scenario.D |
+    scenario.V == scenario.D |
+    (scenario.V %in% c(2, 5, 8) & scenario.D == 2) |
+    (scenario.D != 2 & !(scenario.V %in% c(3, 5, 6, 8, 9)))) %>%
+  # filter(policy   == "all_domains_equal") %>%
+  mutate(corr = paste0("$\\rho=", `scenario.ρ`, ", \\tau=", `scenario.τ`, "$")) %>%
+  mutate(corr = factor(corr, levels = unique(corr))) %>%
+  # mutate(policy = stringr::str_replace_all(pattern="_",replacement="\\\\_",policy))%>%
+  arrange(scenario.D, scenario.V) %>%
+  # filter(!(scenario.V %in% c(7,9))) %>%
+  mutate(DV = ifelse(
+    scenario.D == scenario.V,
+    paste0("D=", scenario.D, ", V=", scenario.V),
+    paste0("\\phantom{", scenario.D, "}", "“, V=", scenario.V)
+  )) %>%
+  mutate(DV = factor(DV, levels = rev(unique(DV)))) %>%
+  group_by(policy, scenario.D, scenario.V, DV, corr, params) %>%
+  summarise(
+    CGr.TV_value.min = min(CGr.go.A),
+    FGr.LRV_value.max = max(FGr.stop.A),
+    CGr.TV_value.max = max(CGr.go.A),
+    FGr.LRV_value.min = min(FGr.stop.A),
+    CGr.TV_value.median = min(CGr.go.A),
+    FGr.LRV_value.median = max(FGr.stop.A),
+  ) %>%
+  pivot_longer(
+    cols = starts_with("FGr.LRV") |
+      starts_with("CGr.TV"),
+    names_to = c("metric", ".value"),
+    names_sep = "_"
+  ) %>%
+  ungroup() %>%
+  mutate(metric = list(
+    CGr.TV = "CGr at $\\mathbf{TV}$",
+    FGr.LRV = "FGr at $\\mathbf{LRV}$"
+  )[metric] %>% unlist()) %>%
+  mutate(metric = factor(metric, levels = unique(metric))) %>%
+  mutate(policy = list(
+    all_domains_equal = "$G^{\\mathrm{all.eq}}_{x:=2,z:=0,\\alpha:=0.05}$",
+    hierarchical_domains = "$G^{\\mathrm{hier}}_{x:=2,\\alpha:=0.05}$"
+  )[policy] %>% unlist())
+gg <- ggplot(dd) +
+  facet_grid(corr ~ metric, scales = "free_x") +
+  # geom_rect(xmin=-Inf, ymin=-Inf,
+  #           aes(fill = metric),
+  #           alpha=0.1, xmax=+Inf, ymax=+Inf,
+  #           data = dd %>% select(metric) %>% distinct(),
+  #           show.legend = FALSE)+
+  # scale_fill_manual(values = c(decision.colors$Discuss, decision.colors$Go))+
+  geom_tile( # y=scenario.Vd,
+    aes(y = y, x = DV, fill = metric, alpha = factor(scenario.D %% 2)),
+    height = +Inf, width = 1,
+    data = dd %>%
+      group_by(metric, scenario.D, DV) %>%
+      summarise(y = median(value.median)) %>%
+      ungroup(),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = c(decision.colors$Discuss, decision.colors$Go)) +
+  scale_alpha_manual(values = c("1" = 0.1, "0" = 0.02)) +
+  geom_point(aes(
+    x = DV, y = value.median,
+    col = policy
+  )) +
+  geom_linerange(aes(
+    x = DV, ymin = value.min, ymax = value.max,
+    col = policy
+  ), size = 1.35, show.legend = FALSE) +
+  coord_flip() +
+  theme(legend.position = "bottom") +
+  labs(y = "Go rate", x = "", col = "Policy") +
+  # If zero is in the neighbourhood, invite it in
+  scale_y_continuous(
+    labels = function(x) scales::percent(x, suffix = "\\%", accuracy = 1),
+    limits = function(x) {
+      if (x[1] < 0.05) {
+        x[1] <- 0
+        x
+      } else {
+        x
+      }
+    }
+  ) +
+  scale_colour_Publication() +
+  theme_Publication()
+print(gg)
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.7, height = 7.5
+)
+print(gg)
+dev.off()
+cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+```
+
+# Figure 3.9 - Detail of Figure 3.8 for D = 3,4,5 and V=10.
+```{r}
+library(tikzDevice)
+library(ggplot2)
+
+format_vd_list <- function(vds) {
+  t <- stringr::str_replace_all(pattern = "_", replacement = ",", vds)
+  r <- paste0(
+    "\\underline{",
+    substring(t, 1, 1),
+    "}",
+    substring(t, 2)
+  )
+  factor(r, levels = unique(r))
+}
+file.name <- "report/plot_effect_0_hierarchical_mm_bis.tex.fig"
+
+dd <- SCENARIO.METRICS %>%
+  filter(
+    scenario.D %in% c(3, 4, 5),
+    scenario.V == 7,
+    `scenario.τ` == 0.2 & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0,
+    # `scenario.τ` == 0.4,
+    params == "default"
+  ) %>%
+  ungroup() %>%
+  arrange(-CSr.stop.C) %>%
+  select(scenario.D, scenario.Vd, `scenario.ρ`, `scenario.τ`, policy, FSr.go.A, CSr.stop.C) %>%
+  pivot_longer(cols = c("FSr.go.A", "CSr.stop.C"), names_to = "metric", values_to = "value") %>%
+  mutate(metric = list(
+    CSr.stop.C = "CSr at $\\mathbf{0}$",
+    FSr.go.A = "FSr at $\\mathbf{TV}$"
+  )[metric] %>% unlist()) %>%
+  mutate(metric = factor(metric, levels = unique(metric))) %>%
+  mutate(policy = list(
+    all_domains_equal = "$G^{\\mathrm{all.eq}}_{x:=2,z:=0,\\alpha:=0.05}$",
+    hierarchical_domains = "$G^{\\mathrm{hier}}_{x:=2,\\alpha:=0.05}$"
+  )[policy] %>% unlist()) %>%
+  arrange(`scenario.τ`) %>%
+  mutate(corr = paste0("$\\rho=", `scenario.ρ`, ", \\tau=", `scenario.τ`, "$")) %>%
+  mutate(corr = factor(corr, levels = (unique(corr)))) %>%
+  arrange(scenario.D, scenario.Vd) %>%
+  mutate(scenario.Vd = factor(scenario.Vd, levels = rev(unique(scenario.Vd))))
+gg <- ggplot(dd) +
+  # geom_rect(xmin=-Inf, ymin=-Inf,
+  #           aes(fill = metric),
+  #           alpha=0.1, xmax=+Inf, ymax=+Inf,
+  #           data = dd %>% select(metric) %>% distinct(),
+  #           show.legend = FALSE)+
+  geom_tile( # y=scenario.Vd,
+    aes(y = y, x = scenario.Vd, fill = metric, alpha = factor(scenario.D %% 2)),
+    height = +Inf, width = 1,
+    data = dd %>%
+      group_by(metric, scenario.D, scenario.Vd) %>%
+      summarise(y = median(value)) %>%
+      ungroup(),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = c(decision.colors$Discuss, decision.colors$Stop)) +
+  scale_alpha_manual(values = c("1" = 0.1, "0" = 0.02)) +
+  geom_point(aes(x = scenario.Vd, y = value, col = policy)) +
+  coord_flip() +
+  facet_grid(corr ~ metric, scales = "free_x") +
+  xlab("Grouping of variables into domains (\\underline{$V_1$}$,V_2,…,V_D$)") +
+  ylab("Stop rate") +
+  labs(col = "Policy") +
+  theme(legend.position = "bottom") +
+  scale_x_discrete(labels = format_vd_list) +
+  scale_y_continuous(labels = function(x) scales::percent(x, suffix = "\\%", accuracy = 1)) +
+  scale_colour_Publication() +
+  theme_Publication()
+# dev.off()
+print(gg)
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.7, height = 7.5
+)
+print(gg)
+dev.off()
+cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+```
+
+# Figure 3.8 False Stop rate (FSr) at μ = TV and Correct Stop rate (CSr) when μ = 0 for the policies G^all.eq_2,0,0.05 and G^hier_2.0.05.
+
+```{r}
+file.name <- "report/plot_stop_rate_policies_bis.tex.fig"
+dd <- SCENARIO.METRICS %>%
+  filter(
+    params == "default",
+    `scenario.τ` == 0.2 & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0.4 |
+      `scenario.τ` == 0 & `scenario.ρ` == 0
+  ) %>%
+  filter(scenario.V == 4 * scenario.D |
+    scenario.V == scenario.D |
+    (scenario.V %in% c(2, 5, 8) & scenario.D == 2) |
+    (scenario.D != 2 & !(scenario.V %in% c(3, 5, 6, 8, 9)))) %>%
+  # filter(policy   == "all_domains_equal") %>%
+  mutate(corr = paste0("$\\rho=", `scenario.ρ`, ", \\tau=", `scenario.τ`, "$")) %>%
+  mutate(corr = factor(corr, levels = unique(corr))) %>%
+  # mutate(policy = stringr::str_replace_all(pattern="_",replacement="\\\\_",policy))%>%
+  arrange(scenario.D, scenario.V) %>%
+  mutate(DV = ifelse(
+    scenario.D == scenario.V,
+    paste0("D=", scenario.D, ", V=", scenario.V),
+    paste0("\\phantom{", scenario.D, "}", "“, V=", scenario.V)
+  )) %>%
+  mutate(DV = factor(DV, levels = rev(unique(DV)))) %>%
+  group_by(policy, scenario.D, scenario.V, DV, corr, params) %>%
+  summarise(
+    FSr.TV_value.min = min(FSr.go.A),
+    CSr.0_value.max = max(CSr.stop.C),
+    FSr.TV_value.max = max(FSr.go.A),
+    CSr.0_value.min = min(CSr.stop.C),
+    FSr.TV_value.median = max(FSr.go.A),
+    CSr.0_value.median = min(CSr.stop.C),
+  ) %>%
+  pivot_longer(
+    cols = starts_with("FSr.TV") | starts_with("CSr.0"),
+    names_sep = "_",
+    names_to = c("metric", ".value")
+  ) %>%
+  ungroup() %>%
+  mutate(metric = list(
+    FSr.TV = "FSr at $\\mathbf{TV}$",
+    CSr.0 = "CSr at $\\mathbf{0}$"
+  )[metric] %>% unlist()) %>%
+  mutate(metric = factor(metric, levels = unique(metric))) %>%
+  mutate(policy = list(
+    all_domains_equal = "$G^{\\mathrm{all.eq}}_{x:=2,z:=0,\\alpha:=0.05}$",
+    hierarchical_domains = "$G^{\\mathrm{hier}}_{x:=2,\\alpha:=0.05}$"
+  )[policy] %>% unlist())
+gg <- ggplot(dd) +
+  facet_grid(corr ~ metric, scales = "free_x") +
+  # geom_rect(xmin=-Inf, ymin=-Inf,
+  #           aes(fill = metric),
+  #           alpha=0.1, xmax=+Inf, ymax=+Inf,
+  #           data = dd %>% select(metric) %>% distinct(),
+  #           show.legend = FALSE)+
+  # scale_fill_manual(values = c(decision.colors$Discuss, decision.colors$Stop))+
+  geom_tile( # y=scenario.Vd,
+    aes(x = y, y = DV, fill = metric, alpha = factor(scenario.D %% 2)),
+    width = +Inf, height = 1,
+    data = dd %>%
+      group_by(metric, scenario.D, DV) %>%
+      summarise(y = median(value.median)) %>%
+      ungroup(),
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = c(decision.colors$Discuss, decision.colors$Stop)) +
+  scale_alpha_manual(values = c("1" = 0.1, "0" = 0.02)) +
+  geom_linerange(aes(
+    y = DV, xmin = value.min, xmax = value.max,
+    col = policy
+  ), size = 1.35, show_guide = FALSE) +
+  geom_point(aes(
+    y = DV, x = value.median,
+    col = policy
+  )) +
+  theme(legend.position = "bottom") +
+  labs(x = "Stop rate", y = "", col = "Policy") +
+  scale_x_continuous(labels = function(x) scales::percent(x, suffix = "\\%", accuracy = 1)) +
+  scale_colour_Publication() +
+  theme_Publication()
+print(gg)
+tikzDevice::tikz(
+  file = file.name,
+  width = 4.7, height = 7.5
+)
+print(gg)
+dev.off()
+cat(paste0(readLines(file.name)[1:7] %>% .[!is.na(.)], collapse = "\n"))
+```

@@ -1,0 +1,45 @@
+#' Table 3.1 – Power for one endpoint depending on the number of patients and standard deviation.
+
+```{r}
+library(tibble)
+library(dplyr)
+df <- tibble::tibble(
+  N      = c(17, 17),
+  sigma  = c(1, 2),
+  effect = c(1, 1),
+  alpha  = c(0.05),
+) %>%
+  rowwise() %>%
+  mutate(power = pwr::pwr.t.test(
+    n = N,
+    d = effect / sigma,
+    sig.level = alpha,
+    type = "two.sample",
+    alt = "two.sided"
+  )$power)
+
+options(knitr.table.format = "latex")
+library(kableExtra)
+table <- knitr::kable(
+  df %>%
+    mutate(
+      power = format(round(power, 4), nsmall = 4),
+      sigma = format(round(sigma, 4), nsmall = 4),
+      effect = NULL,
+      alpha = NULL
+    ) %>%
+    rename(
+      "No. patients per arm" = N,
+      "Standard deviation ($σ$)" = sigma,
+      # "Effect size ($μ$)" = effect,
+      # "Significance level ($α$)" = alpha,
+      "Power (two sided)" = power
+    ),
+  escape = F, align = "rrrr", booktabs = T
+) %>%
+  kable_styling(latex_options = "striped", position = "left")
+
+file.name <- paste0("report/table_power.tex")
+table %>% save_kable(file = file.name)
+cat(paste0(readLines(file.name)[1:21] %>% .[!is.na(.)], collapse = "\n"))
+```

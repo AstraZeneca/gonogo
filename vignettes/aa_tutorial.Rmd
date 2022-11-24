@@ -1,0 +1,209 @@
+---
+title: "Tutorial"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteIndexEntry{Tutorial}
+  %\VignetteEncoding{UTF-8}
+---
+
+Note: Some of the functions in this vignette can be quite demanding.
+Increasing the `resolution`, or decreasing the number of
+simulations (`N`) may help.
+The `cores` argument can extend the computation over multiple cores,
+but is only effective on linux machines (including many computing clusters,
+such as AstraZeneca's SCP).
+
+```{r, message=FALSE}
+library(gonogo)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+
+knitr::opts_chunk$set(fig.width = 7, fig.height = 5)
+```
+
+
+```{r}
+ENDPOINTS <- make_endpoints(
+  n.domains = 4,
+  domain.names = c(
+    "Well-being",
+    "Biomarker",
+    "CT",
+    "Ph3"
+  ),
+  domain.n.vars = c(2, 2, 1, 1),
+  corr.inter = 0,
+  corr.intra = 0.4,
+  vars.sd = c(2, 2, 0.5, 2.1, 1, 5),
+  vars.lrv = 0.5,
+  vars.tv = 1,
+)
+
+ENDPOINTS$vars
+ENDPOINTS$sigma
+```
+
+# Defining a trial
+
+```{r}
+TRIAL <- ENDPOINTS %>%
+  with_n_patients(per.group = 17)
+
+power_per_var(TRIAL,
+  use.effect = "tv",
+  alpha = 0.05
+)$vars %>%
+  select(name, sigma.sq, df, power)
+```
+
+# Defining a policy
+
+```{r}
+domain_pol <- p_policy(
+  stop.if = for_all_endpoints(p_lalonde %>% is_Stop()),
+  go.if   = for_at_least_1_endpoint(p_lalonde %>% is_Go())
+)
+
+# This is slow:
+# run_montecarlo_grid_schema(
+#   TRIAL %at_domain% "Biomarker",
+#   domain_pol,
+#   list(p.FS = 0.1, p.FG=0.2),
+#   resolution=0.05,
+#   cores=128) %>% plot_lalonde_grid
+```
+
+```{r}
+my_policy <- p_policy(
+  stop.if =
+    ((domain_pol %>% is_Stop()) %at_domain% "Biomarker") %and%
+      (for_at_least_k_domains(k = 2, domain_pol %>% is_Stop())
+      %at_domains% c("Well-being", "CT", "Ph3")),
+  go.if =
+    ((domain_pol %>% is_Go()) %at_domain% "Biomarker") %or%
+      (for_at_least_k_domains(k = 2, domain_pol %>% is_Go())
+      %at_domains% !"Biomarker")
+)
+```
+
+
+# Define effects
+
+```{r}
+SCENARIO <-
+  TRIAL %>%
+  with_true_effects(
+    go.when = list(
+      all.tv = effect_is_gt("tv"),
+      Bio.tv = is_gt(0) %and%
+        (is_gt("tv") %at_domain% "Biomarker")
+    ),
+    stop.when = list(
+      all.LRV = is_lt("lrv"),
+      all.0   = is_lt(0)
+    )
+  )
+
+SCENARIO %>%
+  get_effect_points() %>%
+  # Transpose the table so that it fits on the screen
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(!"effect.name") %>%
+  pivot_wider(names_from = "effect.name", values_from = "value")
+```
+
+# Simulate 
+
+```{r}
+start_time <- Sys.time()
+SIM <-
+  SCENARIO %>%
+  simulate_with_policy(
+    my_policy,
+    N = 1000,
+    cores = 1,
+    simulate.fast = TRUE
+  ) %>%
+  with_params(list(p.FG = 0.2, p.FS = 0.1)) %>%
+  get_decisions_per_effect()
+end_time <- Sys.time()
+end_time - start_time
+SIM %>% select(effect.name, p.go, p.discuss, p.stop, "error.p.overall")
+```
+# Analyse
+```{r}
+ggplot(
+  SIM %>% pivot_decisions_longer(),
+  aes(x = effect.name, y = p, fill = decision)
+) +
+  geom_col() +
+  # Percentage labels
+  geom_text(
+    aes(label = ifelse(p < 0.08, "", paste0(round(p * 100), "%"))),
+    position = position_stack(0.5, reverse = FALSE)
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  # Lalonde colors
+  scale_fill_Decision()
+```
+
+# Corrected for multiple testing
+
+```{r}
+domain_pol.2 <- p_policy(
+  stop.if = for_all_endpoints(p_lalonde %>% is_Stop()),
+  go.if = at_least_1_corrected(
+    at_each_endpoint(p_lalonde %>% has_go()),
+    level = "p.FG",
+    correction = "simes"
+  )
+)
+
+# This is slow:
+# run_montecarlo_grid_schema(
+#   TRIAL %at_domain% "Biomarker",
+#   domain_pol.2,
+#   list(p.FS = 0.1, p.FG=0.2),
+#   resolution=0.05,
+#   cores=128) %>% plot_lalonde_grid
+```
+
+```{r}
+my_policy.2 <- p_policy(
+  stop.if =
+    ((domain_pol.2 %>% is_Stop()) %at_domain% "Biomarker") %and%
+      (for_at_least_k_domains(k = 2, domain_pol.2 %>% is_Stop())
+      %at_domains% c("Well-being", "CT", "Ph3")),
+  go.if =
+    ((domain_pol.2 %>% is_Go()) %at_domain% "Biomarker") %or%
+      (for_at_least_k_domains(k = 2, domain_pol.2 %>% is_Go())
+      %at_domains% !"Biomarker")
+)
+
+SIM.2 <- SCENARIO %>%
+  simulate_with_policy(
+    my_policy.2,
+    N = 1000,
+    cores = 2,
+    simulate.fast = TRUE
+  ) %>%
+  with_params(list(p.FG = 0.2, p.FS = 0.1)) %>%
+  get_decisions_per_effect()
+
+ggplot(
+  SIM.2 %>% pivot_decisions_longer(),
+  aes(x = effect.name, y = p, fill = decision)
+) +
+  geom_col() +
+  # Percentage labels
+  geom_text(
+    aes(label = ifelse(p < 0.08, "", paste0(round(p * 100), "%"))),
+    position = position_stack(0.5, reverse = FALSE)
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  # Lalonde colors
+  scale_fill_Decision()
+```
